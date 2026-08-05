@@ -13,3 +13,7 @@ __pycache__/
 var/
 *.db
 *.sqlite3
+
+# Offline install bundle: ~55MB of third-party wheels, rebuilt on demand.
+# Shipped inside the release package, never committed.
+deploy/wheelhouse/

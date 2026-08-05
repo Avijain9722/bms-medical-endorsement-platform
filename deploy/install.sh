@@ -21,8 +21,20 @@ echo "==> Virtual environment"
 [ -d .venv ] || python3 -m venv .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
-python -m pip install --quiet --upgrade pip
-python -m pip install --quiet -r requirements.txt
+
+# If the offline bundle is present, install from it and never touch the network.
+# --no-index makes pip refuse to contact PyPI at all, so an incomplete bundle
+# fails loudly here rather than silently reaching out from a host that is not
+# supposed to have internet access.
+WHEELS="$HERE/wheelhouse"
+if [ -d "$WHEELS" ]; then
+    echo "    offline bundle found -- installing without network access"
+    python -m pip install --quiet --no-index --find-links "$WHEELS" -r requirements.txt
+else
+    echo "    no offline bundle -- downloading from PyPI"
+    python -m pip install --quiet --upgrade pip
+    python -m pip install --quiet -r requirements.txt
+fi
 
 echo "==> Configuration"
 if [ ! -f "$APP/.env" ]; then

@@ -9,6 +9,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Maintainers | You are changing the code and want to know why it is shaped this way |
 | [TEST_RESULTS.md](TEST_RESULTS.md) | Everyone | You want to know what is proven and what is not |
 | [CI_PIPELINE.md](CI_PIPELINE.md) | Maintainers | Changing the workflows, or reading a failed run |
+| [OFFLINE_INSTALL.md](OFFLINE_INSTALL.md) | Installers | The BMS server has no internet access |
 | [`../deploy/`](../deploy) | Installers | Scripted install for Linux and Windows |
 
 ## The short version

@@ -26,14 +26,36 @@ if ($LASTEXITCODE -ne 0) { throw 'Python 3.11 or newer is required' }
 
 Write-Host '==> Virtual environment'
 if (-not (Test-Path '.venv')) { python -m venv .venv }
-& .\.venv\Scripts\python.exe -m pip install --quiet --upgrade pip
-& .\.venv\Scripts\python.exe -m pip install --quiet -r requirements.txt
+
+# If the offline bundle is present, install from it and never touch the network.
+# -NoIndex makes pip refuse to contact PyPI at all, so an incomplete bundle fails
+# loudly here rather than silently reaching out from a host that is not supposed
+# to have internet access.
+$wheels = Join-Path $here 'wheelhouse'
+$offline = Test-Path $wheels
+if ($offline) {
+    Write-Host '    offline bundle found -- installing without network access'
+    & .\.venv\Scripts\python.exe -m pip install --quiet --no-index --find-links $wheels -r requirements.txt
+} else {
+    Write-Host '    no offline bundle -- downloading from PyPI'
+    & .\.venv\Scripts\python.exe -m pip install --quiet --upgrade pip
+    & .\.venv\Scripts\python.exe -m pip install --quiet -r requirements.txt
+}
+if ($LASTEXITCODE -ne 0) { throw 'dependency installation failed' }
 
 Write-Host '==> Excel automation'
 # pywin32 is what lets the log and Daman workbook be recalculated before
 # hand-off. Without it both files are still produced correctly, but their
 # formulas are left uncalculated until someone opens them.
-& .\.venv\Scripts\python.exe -m pip install --quiet pywin32
+if ($offline) {
+    & .\.venv\Scripts\python.exe -m pip install --quiet --no-index --find-links $wheels pywin32
+} else {
+    & .\.venv\Scripts\python.exe -m pip install --quiet pywin32
+}
+if ($LASTEXITCODE -ne 0) {
+    Write-Host '    pywin32 unavailable -- the log and Daman workbooks will be written'
+    Write-Host '    with formulas intact but uncalculated; Excel calculates them on open.'
+}
 
 Write-Host '==> Configuration'
 if (-not (Test-Path '.env')) {
