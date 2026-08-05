@@ -48,6 +48,9 @@ class Settings:
     # Case records, member rows, log entries and the audit trail are kept.
     document_retention_hours: int = int(os.environ.get("BMS_DOCUMENT_RETENTION_HOURS", 36))
     purge_enabled: bool = _bool("BMS_PURGE_ENABLED", True)
+    # How often the background purge runs. 0 disables the scheduler entirely, in
+    # which case `python3 -m bms.cli purge` can be driven by an external timer.
+    purge_interval_minutes: int = int(os.environ.get("BMS_PURGE_INTERVAL_MINUTES", 60))
 
     # OCR must run locally. No document may be sent to an external service.
     ocr_enabled: bool = _bool("BMS_OCR_ENABLED", True)

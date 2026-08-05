@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 from datetime import date
 
 
+class UnsupportedValue(Exception):
+    """A canonical value the target template has no literal for."""
+
+
 @dataclass(frozen=True)
 class ValueMap:
     """Per-template literals for the controlled fields."""
@@ -28,7 +32,9 @@ class ValueMap:
     relation: dict[str, str] = field(default_factory=dict)
     marital_status: dict[str, str] = field(default_factory=dict)
     date_format: str = "%d-%m-%Y"
-    complete: bool = True
+    # Values this insurer genuinely cannot express, with the reason. Writing an
+    # approximation into a regulated submission is worse than refusing.
+    unsupported: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def render_date(self, iso_value: str | None) -> str | None:
         """Convert a stored ISO date into the template's expected text form."""
@@ -43,8 +49,18 @@ class ValueMap:
         return parsed.strftime(self.date_format)
 
     def render(self, kind: str, value: str | None) -> str | None:
+        """Translate a canonical value into this template's literal.
+
+        A value the template's own dropdown cannot express raises, rather than
+        being passed through and silently rejected by the insurer's import.
+        """
         if not value:
             return None
+        blocked = self.unsupported.get(kind, {})
+        if value in blocked:
+            raise UnsupportedValue(
+                f"{self.key} cannot express {kind}={value!r}: {blocked[value]}"
+            )
         table = getattr(self, kind, {})
         return table.get(value, value)
 
@@ -70,31 +86,72 @@ NAS = ValueMap(
     date_format="%d-%m-%Y",
 )
 
-# Declared for shape only -- these templates are out of scope for phase 1 and
-# their literals have not been confirmed against a completed example.
+# ADNIC uses uppercase throughout, and calls the principal MEMBER. Every literal
+# below is taken from the workbook's own inline validation lists:
+#   Gender     "MALE,FEMALE"
+#   Dependency "MEMBER,SPOUSE,CHILD"
+#   Marital    "SINGLE,MARRIED"
+# The workbook offers no Parent or Ex-Spouse dependency, so those raise rather
+# than being quietly bent into CHILD.
 ADNIC = ValueMap(
     key="adnic",
-    gender={"Male": "MALE", "Female": "FEMALE"},
-    relation={"Principal": "MEMBER", "Spouse": "SPOUSE", "Child": "CHILD"},
+    gender={"Male": "MALE", "Female": "FEMALE", "M": "MALE", "F": "FEMALE"},
+    relation={"Principal": "MEMBER", "Employee": "MEMBER", "Spouse": "SPOUSE", "Child": "CHILD"},
     marital_status={"Single": "SINGLE", "Married": "MARRIED"},
-    complete=False,
+    unsupported={
+        "relation": {
+            "Parent": "ADNIC's Dependency list offers only MEMBER, SPOUSE and CHILD.",
+            "Ex-Spouse": "ADNIC's Dependency list offers only MEMBER, SPOUSE and CHILD.",
+            "Others": "ADNIC's Dependency list offers only MEMBER, SPOUSE and CHILD.",
+        },
+        "marital_status": {
+            "Divorced": "ADNIC's Marital list offers only SINGLE and MARRIED.",
+            "Widowed": "ADNIC's Marital list offers only SINGLE and MARRIED.",
+        },
+    },
 )
 
+# Daman codes everything, per its List Values sheet:
+#   GenderList  M / F        MaritalList  M / S
+#   RelationList Principal, Spouse, Child, Parent
+# Its instruction row states dates as DD/MM/YYYY.
 DAMAN = ValueMap(
     key="daman",
-    gender={"Male": "M", "Female": "F"},
+    gender={"Male": "M", "Female": "F", "M": "M", "F": "F"},
     relation={"Principal": "Principal", "Spouse": "Spouse", "Child": "Child", "Parent": "Parent"},
     marital_status={"Single": "S", "Married": "M"},
     date_format="%d/%m/%Y",
-    complete=False,
+    unsupported={
+        "relation": {
+            "Ex-Spouse": "Daman's RelationList offers Principal, Spouse, Child and Parent.",
+            "Others": "Daman's RelationList offers Principal, Spouse, Child and Parent.",
+        },
+        "marital_status": {
+            "Divorced": "Daman's MaritalList offers only M and S.",
+            "Widowed": "Daman's MaritalList offers only M and S.",
+        },
+    },
 )
 
+# Sukoon's hidden Sheet2 lists both labels and codes for gender, relation and
+# marital status; the labels are used, since the visible columns are validated
+# against the label ranges. Its Relation list calls the principal Employee.
 SUKOON = ValueMap(
     key="sukoon",
-    gender={"Male": "Male", "Female": "Female"},
-    relation={"Principal": "Employee", "Spouse": "Spouse", "Child": "Child"},
+    gender={"Male": "Male", "Female": "Female", "M": "Male", "F": "Female"},
+    relation={"Principal": "Employee", "Employee": "Employee", "Spouse": "Spouse", "Child": "Child"},
     marital_status={"Single": "Single", "Married": "Married"},
-    complete=False,
+    unsupported={
+        "relation": {
+            "Parent": "Sukoon's relation list offers only Employee, Spouse and Child.",
+            "Ex-Spouse": "Sukoon's relation list offers only Employee, Spouse and Child.",
+            "Others": "Sukoon's relation list offers only Employee, Spouse and Child.",
+        },
+        "marital_status": {
+            "Divorced": "Sukoon's marital list offers only Single and Married.",
+            "Widowed": "Sukoon's marital list offers only Single and Married.",
+        },
+    },
 )
 
 # Template key -> value map. New insurers are registered here.

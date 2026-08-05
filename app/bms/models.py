@@ -277,6 +277,10 @@ class CaseFile(Base):
     media_type: Mapped[str | None] = mapped_column(String(128))
 
     status: Mapped[str] = mapped_column(String(32), default=FileStatus.STORED.value)
+    # Virus-scan outcome. "unavailable" means no scanner was installed, which is
+    # recorded rather than being treated as clean.
+    scan_verdict: Mapped[str] = mapped_column(String(24), default="unavailable")
+    scan_detail: Mapped[str | None] = mapped_column(Text)
     document_type: Mapped[str] = mapped_column(String(48), default=DocumentType.UNKNOWN.value)
     classification_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     manually_classified: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -425,6 +429,10 @@ class Export(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     fingerprint_ok: Mapped[bool] = mapped_column(Boolean, default=False)
     row_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Whether Excel evaluated the workbook's formulas before hand-off. False on a
+    # non-Windows host: the file is complete and Excel calculates on first open.
+    recalculated: Mapped[bool] = mapped_column(Boolean, default=False)
+    recalc_detail: Mapped[str | None] = mapped_column(Text)
 
     created_by_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

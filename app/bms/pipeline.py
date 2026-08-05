@@ -7,7 +7,7 @@ depends on the browser holding anything.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from . import audit
 from .config import Settings, settings
-from .intake import archives, instructions
+from .intake import archives, instructions, scanning
 from .matching.grouping import DocumentIdentity, MemberGroup, archive_root, group_documents, link_principals
 from .models import (
     Case,
@@ -38,6 +38,7 @@ from .ocr.text import TextPipeline
 from .outputs import log as log_output
 from .outputs import nas as nas_output
 from .outputs import package as package_output
+from .outputs import recalc as recalc_output
 from .storage import ExportStorage, Storage
 from .templates.specs import SPECS_BY_KEY
 from .validation.rules import (
@@ -73,6 +74,8 @@ class UploadOutcome:
     duplicates: list[str]
     skipped: list[tuple[str, str]]
     password_protected: bool
+    # Rejected by the virus scanner. These are never written to storage.
+    infected: list[tuple[str, str]] = dataclass_field(default_factory=list)
 
 
 def next_reference(session: Session) -> str:
@@ -131,7 +134,9 @@ def add_upload(
     config.ensure_directories()
     storage = Storage(config)
 
-    outcome = UploadOutcome(stored=[], duplicates=[], skipped=[], password_protected=False)
+    outcome = UploadOutcome(
+        stored=[], duplicates=[], skipped=[], password_protected=False, infected=[]
+    )
 
     if len(data) > config.max_upload_bytes:
         outcome.skipped.append((filename, "exceeds the maximum upload size"))
@@ -153,6 +158,12 @@ def add_upload(
     }
 
     for name, archive_path, payload in payloads:
+        # Scan before storing: an infected payload never reaches the filesystem.
+        verdict = scanning.scan_bytes(payload, filename=name)
+        if verdict.blocks_upload:
+            outcome.infected.append((archive_path or name, verdict.detail))
+            continue
+
         digest, _ = storage.put_bytes(payload)
         if digest in existing:
             outcome.duplicates.append(archive_path or name)
@@ -167,6 +178,8 @@ def add_upload(
             byte_size=len(payload),
             media_type=_guess_media_type(name),
             status=FileStatus.STORED.value,
+            scan_verdict=verdict.verdict,
+            scan_detail=verdict.detail[:2000] if verdict.detail else None,
         )
         session.add(record)
         outcome.stored.append(record)
@@ -184,6 +197,8 @@ def add_upload(
             "stored": len(outcome.stored),
             "duplicates": len(outcome.duplicates),
             "skipped": len(outcome.skipped),
+            "infected": len(outcome.infected),
+            "scanner": scanning.describe_host()["engine"],
         },
     )
     return outcome
@@ -555,6 +570,13 @@ def _raise_flags(
         )
 
     for record in file_by_id.values():
+        if record.scan_verdict in ("unavailable", "error"):
+            add(
+                "not_virus_scanned",
+                Severity.WARNING,
+                f"{record.original_name} was not virus scanned ({record.scan_verdict}). "
+                "Install a local scanner, or confirm the file's provenance before opening it.",
+            )
         if record.status == FileStatus.OCR_UNAVAILABLE.value:
             add(
                 "ocr_unavailable",
@@ -767,6 +789,9 @@ def export_case(
     portal_bytes = portal_path.read_bytes()
     portal_name = f"{case.reference}-{template_key}{suffix}"
     relative, digest = export_storage.write(case.reference, portal_name, portal_bytes)
+    portal_recalc = recalc_output.recalculate(
+        export_storage.absolute(relative), template_key=template_key
+    )
     portal_export = Export(
         case_id=case.id,
         kind="portal",
@@ -776,6 +801,8 @@ def export_case(
         sha256=digest,
         fingerprint_ok=True,
         row_count=len(built.rows),
+        recalculated=portal_recalc.performed,
+        recalc_detail=portal_recalc.detail,
     )
     session.add(portal_export)
 
@@ -813,6 +840,9 @@ def export_case(
     log_bytes = log_path.read_bytes()
     log_name = f"{case.reference}-New-Log-Format-2026.xlsx"
     log_relative, log_digest = export_storage.write(case.reference, log_name, log_bytes)
+    log_recalc = recalc_output.recalculate(
+        export_storage.absolute(log_relative), template_key="bms.log.2026"
+    )
     log_export = Export(
         case_id=case.id,
         kind="log",
@@ -822,6 +852,8 @@ def export_case(
         sha256=log_digest,
         fingerprint_ok=True,
         row_count=log_result.row_count,
+        recalculated=log_recalc.performed,
+        recalc_detail=log_recalc.detail,
     )
     session.add(log_export)
 

@@ -15,9 +15,13 @@ pile of documents, and produces a NAS portal workbook and the approved BMS log.
 - Local OCR only. No document leaves the host.
 - Case data written to disk and the database as it happens — nothing depends on
   the browser holding state.
-- One NAS addition workflow and one NAS deletion workflow, end to end.
+- All eight registered insurer templates generated end to end: NAS addition
+  (three variants) and deletion, ADNIC enrolment and termination, Sukoon
+  addition, Daman addition.
 - Member-level review and correction, with confidence and exception flags.
-- Append-only audit trail.
+- The approved New Log Format -2026 output, per case and by date range.
+- Supporting-document ZIPs with a manifest.
+- Local virus scanning, append-only audit trail, automatic retention purge.
 
 ---
 
@@ -28,7 +32,8 @@ pile of documents, and produces a NAS portal workbook and the approved BMS log.
 | Python | 3.11 or newer | |
 | Database | SQLite (bundled) or PostgreSQL 14+ | SQLite is fine for a single-user prototype |
 | Tesseract | 5.x | Optional. Without it, scans must be typed in by hand |
-| Microsoft Excel | 365 | Only needed later, for the Daman and log recalculation step |
+| ClamAV | any | Optional. Without it, uploads are recorded as unscanned and flagged |
+| Microsoft Excel | 365 | Windows only. Evaluates the log and Daman formulas before hand-off |
 
 ## Install
 
@@ -89,6 +94,7 @@ client rules live in the database.
 | `BMS_SEED_PASSWORD` | generated | Initial account password |
 | `BMS_DOCUMENT_RETENTION_HOURS` | `36` | Hours after **case closure** before documents are purged |
 | `BMS_PURGE_ENABLED` | `true` | Set `false` to keep documents indefinitely |
+| `BMS_PURGE_INTERVAL_MINUTES` | `60` | How often the built-in purge runs. `0` disables it, for sites using their own scheduler |
 | `BMS_OCR_ENABLED` | `true` | Set `false` to force manual entry |
 | `BMS_TESSERACT_CMD` | `tesseract` | Full path on Windows |
 | `BMS_OCR_LANGUAGES` | `eng+ara` | Passed to Tesseract |
@@ -127,17 +133,29 @@ directly; production should adopt Alembic so schema changes are reviewable.
 7. **Close.** Starts the document retention clock. Records and the audit trail
    are kept regardless.
 
-## Retention
+## Database migrations
 
-Purging is not automatic in the prototype — run it from a scheduled task:
+The prototype creates tables on first start. For a managed deployment use
+Alembic, so schema changes are reviewable and reversible:
 
 ```bash
-cd app && python3 -c "
-from bms.db import init_engine, session_scope
-from bms.pipeline import purge_closed_cases
-init_engine()
-with session_scope() as s:
-    print(purge_closed_cases(s))"
+cd app
+python3 -m alembic upgrade head      # apply
+python3 -m alembic downgrade base    # reverse
+python3 -m alembic revision --autogenerate -m "describe the change"
+```
+
+The URL comes from `BMS_DATABASE_URL`, so the same migrations run on SQLite and
+PostgreSQL. SQLite cannot alter columns in place, so migrations render in batch
+mode automatically.
+
+## Retention
+
+The purge runs automatically every `BMS_PURGE_INTERVAL_MINUTES` inside the
+application. To drive it externally instead, set the interval to `0` and run:
+
+```bash
+cd app && python3 -m bms.cli purge
 ```
 
 It removes uploaded documents and generated files for cases closed more than
@@ -167,17 +185,43 @@ that the pipeline degrades honestly when no OCR engine is present.
 
 ---
 
+## What the host can and cannot do
+
+`/health` reports every capability, so a gap is visible before anyone relies on
+it rather than being discovered at submission time:
+
+```json
+{
+  "ocr_engines": ["plain_text"],
+  "virus_scanning": false, "engine": null,
+  "excel_recalculation": false,
+  "reason": "host is Linux, and Excel automation requires Windows",
+  "templates_requiring_recalculation": ["bms.log.2026", "daman.addition.v1"]
+}
+```
+
+Each missing capability degrades rather than fails:
+
+| Missing | Effect |
+| --- | --- |
+| Tesseract | Scans are marked `ocr_unavailable` and raised for manual entry. Nothing is guessed |
+| ClamAV | Uploads are recorded as `unavailable`, never as clean, and raise a warning flag |
+| Excel | The log and Daman files are written correctly with formulas intact but uncalculated; the export records `recalculated: false` and Excel calculates on first open |
+
 ## Adding another insurer template
 
-Designed so this does not touch processing code:
+Three data changes, no processing code:
 
-1. Add a `TemplateSpec` in `app/bms/templates/specs.py` — source path, entry
-   sheet, header row, first data row, column map.
-2. Add a `ValueMap` in `app/bms/outputs/mapping.py` for that insurer's literals
-   (`Male` vs `MALE` vs `M`) and its date format.
-3. Add a row builder alongside `_addition_row` in `app/bms/outputs/nas.py`, or a
-   sibling module for a differently-shaped template.
-4. Run the preservation suite. It picks up new specs automatically and will fail
-   if the generated file differs structurally from its master.
+1. **`app/bms/templates/specs.py`** — a `TemplateSpec`: source path, entry sheet,
+   header row, first data row, column map.
+2. **`app/bms/outputs/mapping.py`** — a `ValueMap`: how that insurer spells each
+   controlled value, its date format, and any value its dropdowns *cannot*
+   express, which is then refused rather than approximated.
+3. **`app/bms/outputs/bindings.py`** — a `TemplateBinding`: which member field
+   fills which column, plus the columns deliberately left blank and why.
 
-Nothing in intake, OCR, matching, validation, review or audit changes.
+The suite picks new entries up automatically: it asserts the binding only names
+real columns, that a documented blank is not also mapped, and that the generated
+file still matches its structural fingerprint.
+
+Nothing in intake, OCR, matching, validation, review, logging or audit changes.

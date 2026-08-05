@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from .. import pipeline
 from ..config import settings
 from ..db import create_all, get_session, init_engine
-from .. import logbook, master
+from .. import logbook, master, scheduler
 from ..models import (
     AuditEvent,
     Case,
@@ -53,7 +53,12 @@ async def lifespan(_: FastAPI):
     init_engine()
     create_all()
     _ensure_seed_user()
-    yield
+    purge_task = scheduler.start(settings)
+    try:
+        yield
+    finally:
+        if purge_task is not None:
+            purge_task.cancel()
 
 
 app = FastAPI(
@@ -603,14 +608,27 @@ def audit_log(
 
 @app.get("/health")
 def health():
+    """What this host can actually do.
+
+    Deliberately explicit about missing capabilities: a deployment without OCR,
+    without a virus scanner or without Excel still works, but the gaps must be
+    visible rather than discovered later.
+    """
+    from ..intake import scanning
     from ..ocr.text import TextPipeline
+    from ..outputs import recalc
 
     return {
         "status": "ok",
         "database": settings.database_url.split("://", 1)[0],
         "ocr_engines": TextPipeline().available_engines(),
+        "templates": list(SUPPORTED_KEYS),
         "today": date.today().isoformat(),
         "transaction_types": [t.value for t in TransactionType],
+        "retention_hours": settings.document_retention_hours,
+        "purge_interval_minutes": settings.purge_interval_minutes if settings.purge_enabled else 0,
+        **scanning.describe_host(),
+        **recalc.describe_host(),
     }
 
 
