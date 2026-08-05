@@ -1,0 +1,76 @@
+name: Tests
+
+# Runs automatically on every push and pull request, and can also be started by
+# hand from the Actions tab. Two independent gates:
+#
+#   1. source-integrity -- the supplied insurer workbooks, the BMS log template
+#      and the brand assets must be byte-identical to the manifest BMS shipped.
+#      If one drifts, every fingerprint in the registry is silently invalidated,
+#      so this runs first and fails the build.
+#   2. tests -- the 41-test template-preservation suite, which proves a generated
+#      workbook differs from its master only in the cells we deliberately wrote.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-integrity:
+    name: Source integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify supplied files against SHA256SUMS.txt
+        run: python3 tools/verify_sources.py --out "$GITHUB_STEP_SUMMARY"
+        working-directory: app
+
+  tests:
+    name: Template preservation suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The preservation core is standard library only, by design: general
+      # purpose spreadsheet libraries rewrite parts they do not understand.
+      # pytest is the only test-time dependency.
+      - name: Install test dependencies
+        run: python3 -m pip install --quiet pytest
+
+      - name: Run preservation suite
+        run: python3 -m pytest tests -q --junit-xml=../test-results.xml
+        working-directory: app
+
+      - name: Summarise result
+        if: always()
+        run: |
+          {
+            echo "## Template preservation suite"
+            echo
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "**PASSED** — generated workbooks are structurally identical to their masters."
+            else
+              echo "**FAILED** — see the step log above for the structural deltas."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+          if-no-files-found: warn

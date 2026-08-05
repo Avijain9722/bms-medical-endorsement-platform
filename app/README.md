@@ -34,12 +34,20 @@ SHA-512 sheet protection, 18 tables, four form controls and a Microsoft Purview
 sensitivity label. The surgical writer touches `sheetData` and nothing else, so
 all of it survives byte-for-byte — verified by test.
 
-## Running the tests
+## Running the checks
 
 ```bash
 cd app
-python3 -m pytest tests/ -q
+
+python3 tools/verify_sources.py     # supplied files unchanged?
+python3 -m pytest tests/ -q         # 41-test preservation suite
+python3 -m tools.reports all        # readable evidence, not pass/fail
 ```
+
+Both checks also run automatically on every push and pull request, and the
+reports can be requested from the Actions tab. See
+[`docs/CI_PIPELINE.md`](../docs/CI_PIPELINE.md) for what each one covers and how
+to read a failure.
 
 41 tests run against the real supplied workbooks. The suite proves:
 
