@@ -360,7 +360,7 @@ def build_members(
     effective_date, effective_reason = resolve_effective_date(
         case.transaction_type,
         processing_date=processing_date,
-        emirate=_case_emirate(case),
+        emirate=_case_emirate(case, session),
     )
 
     members: list[Member] = []
@@ -462,8 +462,25 @@ def build_members(
     return members
 
 
-def _case_emirate(case: Case) -> str | None:
-    """Best available emirate signal for the deletion date rule."""
+def _case_emirate(case: Case, session: Session | None = None) -> str | None:
+    """The emirate governing the deletion effective-date rule.
+
+    Registered configuration first: the sub-group or policy in the client master
+    records it explicitly. Only when neither is set does this fall back to
+    reading DXB/AUH out of free text, which is a guess and is reported as such.
+    """
+    if session is not None:
+        from .models import ClientPolicy, SubGroup
+
+        if case.sub_group_id:
+            sub_group = session.get(SubGroup, case.sub_group_id)
+            if sub_group and sub_group.emirate:
+                return sub_group.emirate
+        if case.client_policy_id:
+            policy = session.get(ClientPolicy, case.client_policy_id)
+            if policy and policy.emirate:
+                return policy.emirate
+
     haystack = " ".join(
         part for part in (case.policy_no, case.contract_name, case.sub_group, case.category) if part
     ).lower()

@@ -20,16 +20,21 @@ from sqlalchemy.orm import Session
 from .. import pipeline
 from ..config import settings
 from ..db import create_all, get_session, init_engine
+from .. import master
 from ..models import (
     AuditEvent,
     Case,
     CaseFile,
     CaseStatus,
+    Client,
+    ClientPolicy,
     DocumentType,
     Export,
+    LegalEntity,
     Member,
     ReviewFlag,
     Severity,
+    SubGroup,
     TransactionType,
     User,
 )
@@ -77,9 +82,14 @@ def _ensure_seed_user() -> None:
                 display_name="BMS Medical Team",
                 log_associate="JAHNVI",
                 password_hash=hash_password(password),
+                is_admin=True,
             )
         )
-        print(f"[bms] created initial user 'bms' with password: {password}", flush=True)
+        print(
+            f"[bms] created initial administrator 'bms' with password: {password}\n"
+            "[bms] change it at /admin, or with: python3 -m bms.cli reset-password --username bms",
+            flush=True,
+        )
 
 
 # ------------------------------------------------------------------- helpers
@@ -92,6 +102,18 @@ def current_user(request: Request, session: Session = Depends(get_session)) -> U
     user = session.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=303, headers={"Location": "/login"})
+    return user
+
+
+def current_admin(user: User = Depends(current_user)) -> User:
+    """Administration is gated; case processing is not.
+
+    BMS asked for a single operational role, so this guards only account and
+    client-master maintenance. It confers no processing privilege and no ability
+    to override a critical error.
+    """
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access is required.")
     return user
 
 
@@ -173,15 +195,22 @@ def case_list(
 @app.get("/cases/new", response_class=HTMLResponse)
 def new_case_form(
     request: Request,
+    session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    return render(request, "case_new.html", user=user, templates_available=SUPPORTED_KEYS)
+    return render(
+        request,
+        "case_new.html",
+        user=user,
+        templates_available=SUPPORTED_KEYS,
+        clients=_master_snapshot(session),
+    )
 
 
 @app.post("/cases")
 def create_case(
-    client_name: str = Form(...),
-    insurer: str = Form(...),
+    client_name: str = Form(""),
+    insurer: str = Form(""),
     transaction_type: str = Form(...),
     bms_comments: str = Form(""),
     sub_group: str = Form(""),
@@ -191,9 +220,42 @@ def create_case(
     email_subject: str = Form(""),
     email_received_date: str = Form(""),
     template_key: str = Form(""),
+    client_id: str = Form(""),
+    sub_group_id: str = Form(""),
+    legal_entity_id: str = Form(""),
+    client_policy_id: str = Form(""),
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
+    # Values chosen from the client master win over anything typed, so a portal
+    # workbook receives a registered literal rather than a user's spelling.
+    client = session.get(Client, client_id) if client_id else None
+    chosen_sub_group = session.get(SubGroup, sub_group_id) if sub_group_id else None
+    entity = session.get(LegalEntity, legal_entity_id) if legal_entity_id else None
+    policy = session.get(ClientPolicy, client_policy_id) if client_policy_id else None
+
+    if client:
+        client_name = client.name
+    if chosen_sub_group:
+        sub_group = chosen_sub_group.name
+    if entity:
+        contract_name = entity.contract_name or entity.name
+    if policy:
+        insurer = policy.insurer
+        policy_no = policy.policy_no or policy_no
+        category = policy.category or category
+        if not template_key:
+            template_key = (
+                policy.deletion_template_key
+                if transaction_type == TransactionType.DELETION.value
+                else policy.addition_template_key
+            ) or ""
+
+    if not client_name.strip():
+        raise HTTPException(status_code=400, detail="A client is required.")
+    if not insurer.strip():
+        raise HTTPException(status_code=400, detail="An insurer is required.")
+
     received = None
     if email_received_date:
         try:
@@ -216,6 +278,10 @@ def create_case(
         email_received_date=received,
         template_key=template_key or None,
         owner_id=user.id,
+        client_id=client.id if client else None,
+        sub_group_id=chosen_sub_group.id if chosen_sub_group else None,
+        legal_entity_id=entity.id if entity else None,
+        client_policy_id=policy.id if policy else None,
     )
     return RedirectResponse(f"/cases/{case.id}", status_code=303)
 
@@ -544,3 +610,291 @@ def health():
         "today": date.today().isoformat(),
         "transaction_types": [t.value for t in TransactionType],
     }
+
+
+# ------------------------------------------------------------ administration
+
+
+def _master_snapshot(session: Session) -> list[dict]:
+    """The client master, shaped for the case form's dependent dropdowns."""
+    snapshot = []
+    for client in master.active_clients(session):
+        snapshot.append(
+            {
+                "id": client.id,
+                "name": client.name,
+                "code": client.code,
+                "sub_groups": [
+                    {"id": s.id, "name": s.name, "emirate": s.emirate}
+                    for s in sorted(client.sub_groups, key=lambda s: s.name)
+                    if s.active
+                ],
+                "entities": [
+                    {"id": e.id, "name": e.name, "contract_name": e.contract_name}
+                    for e in sorted(client.legal_entities, key=lambda e: e.name)
+                    if e.active
+                ],
+                "policies": [
+                    {
+                        "id": p.id,
+                        "insurer": p.insurer,
+                        "network": p.network,
+                        "policy_no": p.policy_no,
+                        "category": p.category,
+                        "emirate": p.emirate,
+                        "legal_entity_id": p.legal_entity_id,
+                        "addition_template_key": p.addition_template_key,
+                        "deletion_template_key": p.deletion_template_key,
+                    }
+                    for p in client.policies
+                    if p.active
+                ],
+            }
+        )
+    return snapshot
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_home(
+    request: Request,
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+    imported: str | None = None,
+):
+    users = list(session.scalars(select(User).order_by(User.username)))
+    clients = list(session.scalars(select(Client).order_by(Client.name)))
+    return render(
+        request,
+        "admin.html",
+        user=admin,
+        users=users,
+        clients=clients,
+        templates_available=SUPPORTED_KEYS,
+        imported=imported,
+    )
+
+
+@app.post("/admin/users")
+def admin_create_user(
+    request: Request,
+    username: str = Form(...),
+    display_name: str = Form(""),
+    log_associate: str = Form(""),
+    password: str = Form(...),
+    is_admin: str = Form(""),
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    from .. import audit
+
+    if session.scalar(select(User).where(User.username == username.strip())):
+        raise HTTPException(status_code=400, detail=f"User {username!r} already exists.")
+    if len(password) < 10:
+        raise HTTPException(status_code=400, detail="Choose a password of at least 10 characters.")
+
+    user = User(
+        username=username.strip(),
+        display_name=display_name.strip() or username.strip(),
+        log_associate=log_associate.strip() or None,
+        password_hash=hash_password(password),
+        is_admin=bool(is_admin),
+    )
+    session.add(user)
+    session.flush()
+    # The password itself is never written to the audit trail.
+    audit.record(
+        session,
+        action="user.create",
+        entity_type="user",
+        entity_id=user.id,
+        actor=admin.username,
+        detail={"username": user.username, "is_admin": user.is_admin},
+    )
+    return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/password")
+def admin_reset_password(
+    user_id: str,
+    password: str = Form(...),
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    from .. import audit
+
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if len(password) < 10:
+        raise HTTPException(status_code=400, detail="Choose a password of at least 10 characters.")
+    user.password_hash = hash_password(password)
+    audit.record(
+        session,
+        action="user.reset_password",
+        entity_type="user",
+        entity_id=user.id,
+        actor=admin.username,
+        detail={"username": user.username},
+    )
+    return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/admin/clients")
+def admin_create_client(
+    name: str = Form(...),
+    code: str = Form(""),
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    from .. import audit
+
+    client, created = master.get_or_create_client(session, name.strip(), code=code.strip() or None)
+    if created:
+        audit.record(
+            session,
+            action="client.create",
+            entity_type="client",
+            entity_id=client.id,
+            actor=admin.username,
+            detail={"name": client.name},
+        )
+    return RedirectResponse(f"/admin/clients/{client.id}", status_code=303)
+
+
+@app.get("/admin/clients/{client_id}", response_class=HTMLResponse)
+def admin_client_detail(
+    client_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    client = session.get(Client, client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return render(
+        request,
+        "admin_client.html",
+        user=admin,
+        client=client,
+        templates_available=SUPPORTED_KEYS,
+        emirates=("Abu Dhabi", "Dubai", "Northern Emirates"),
+    )
+
+
+@app.post("/admin/clients/{client_id}/sub-groups")
+def admin_add_sub_group(
+    client_id: str,
+    name: str = Form(...),
+    emirate: str = Form(""),
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    from .. import audit
+
+    client = session.get(Client, client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    sub_group, created = master.get_or_create_sub_group(
+        session, client, name.strip(), emirate=emirate.strip() or None
+    )
+    if created:
+        audit.record(
+            session,
+            action="sub_group.create",
+            entity_type="sub_group",
+            entity_id=sub_group.id,
+            actor=admin.username,
+            detail={"client": client.name, "name": sub_group.name, "emirate": sub_group.emirate},
+        )
+    return RedirectResponse(f"/admin/clients/{client_id}", status_code=303)
+
+
+@app.post("/admin/clients/{client_id}/entities")
+def admin_add_entity(
+    client_id: str,
+    name: str = Form(...),
+    contract_name: str = Form(""),
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    from .. import audit
+
+    client = session.get(Client, client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    entity, created = master.get_or_create_entity(
+        session, client, name.strip(), contract_name=contract_name.strip() or None
+    )
+    if created:
+        audit.record(
+            session,
+            action="legal_entity.create",
+            entity_type="legal_entity",
+            entity_id=entity.id,
+            actor=admin.username,
+            detail={"client": client.name, "name": entity.name},
+        )
+    return RedirectResponse(f"/admin/clients/{client_id}", status_code=303)
+
+
+@app.post("/admin/clients/{client_id}/policies")
+def admin_add_policy(
+    client_id: str,
+    insurer: str = Form(...),
+    network: str = Form(""),
+    policy_no: str = Form(""),
+    category: str = Form(""),
+    emirate: str = Form(""),
+    legal_entity_id: str = Form(""),
+    addition_template_key: str = Form(""),
+    deletion_template_key: str = Form(""),
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    from .. import audit
+
+    client = session.get(Client, client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    entity = session.get(LegalEntity, legal_entity_id) if legal_entity_id else None
+    policy, created = master.get_or_create_policy(
+        session,
+        client,
+        insurer=insurer.strip(),
+        entity=entity,
+        network=network.strip() or None,
+        policy_no=policy_no.strip() or None,
+        category=category.strip() or None,
+        emirate=emirate.strip() or None,
+        addition_template_key=addition_template_key or None,
+        deletion_template_key=deletion_template_key or None,
+    )
+    if created:
+        audit.record(
+            session,
+            action="client_policy.create",
+            entity_type="client_policy",
+            entity_id=policy.id,
+            actor=admin.username,
+            detail={"client": client.name, "insurer": policy.insurer, "policy_no": policy.policy_no},
+        )
+    return RedirectResponse(f"/admin/clients/{client_id}", status_code=303)
+
+
+@app.post("/admin/clients/import")
+async def admin_import_clients(
+    workbook: UploadFile,
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    data = await workbook.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="No file was uploaded.")
+    try:
+        summary = master.import_workbook(session, data, actor=admin.username)
+    except Exception as error:  # noqa: BLE001 - reported to the user verbatim
+        raise HTTPException(status_code=400, detail=f"Could not read the workbook: {error}") from error
+    return RedirectResponse(
+        f"/admin?imported={summary.rows_read} rows, {summary.total_created} record(s) created",
+        status_code=303,
+    )

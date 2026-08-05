@@ -55,11 +55,22 @@ class OoxmlPackage:
     # ---------------------------------------------------------------- loading
 
     @classmethod
+    def open_bytes(cls, data: bytes) -> "OoxmlPackage":
+        """Open a package already held in memory, such as an upload."""
+        import io
+
+        return cls._read(io.BytesIO(data))
+
+    @classmethod
     def open(cls, path: str | Path) -> "OoxmlPackage":
+        return cls._read(path)
+
+    @classmethod
+    def _read(cls, source) -> "OoxmlPackage":
         parts: dict[str, bytes] = {}
         order: list[str] = []
         infos: dict[str, PartInfo] = {}
-        with zipfile.ZipFile(path) as zf:
+        with zipfile.ZipFile(source) as zf:
             for info in zf.infolist():
                 parts[info.filename] = zf.read(info.filename)
                 order.append(info.filename)

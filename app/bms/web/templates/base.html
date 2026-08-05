@@ -82,6 +82,7 @@ form.inline { display: inline; }
     {% if user %}
       <a href="/">Cases</a>
       <a href="/audit">Audit</a>
+      {% if user.is_admin %}<a href="/admin">Administration</a>{% endif %}
       <span class="muted" style="color:#cfd6e0">{{ user.display_name }}</span>
       <form method="post" action="/logout" class="inline"><button class="secondary">Sign out</button></form>
     {% endif %}

@@ -25,6 +25,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -105,7 +106,102 @@ class User(Base):
     # associates; this binds the signed-in user to that list.
     log_associate: Mapped[str | None] = mapped_column(String(64))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # BMS asked for one operational role for everyone. This flag gates only the
+    # administration area -- user accounts and the client master -- not any
+    # case-processing capability, and it grants no override of a critical error.
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ---------------------------------------------------------- client master
+# The centralised library BMS asked for: clients, their sub-groups, their legal
+# entities and their insurer policies, entered by hand or imported from Excel and
+# shared by every user. Case creation reads from here instead of free text, so
+# the contract name written into a portal workbook is a value BMS registered
+# rather than something a user typed.
+
+
+class Client(Base):
+    """A company BMS administers medical cover for."""
+
+    __tablename__ = "clients"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    code: Mapped[str | None] = mapped_column(String(32))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    sub_groups: Mapped[list["SubGroup"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan"
+    )
+    legal_entities: Mapped[list["LegalEntity"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan"
+    )
+    policies: Mapped[list["ClientPolicy"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan"
+    )
+
+
+class SubGroup(Base):
+    """A sub-group of a company, as the BMS log records it."""
+
+    __tablename__ = "sub_groups"
+    __table_args__ = (UniqueConstraint("client_id", "name", name="uq_sub_group_per_client"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Drives the deletion effective-date rule: Abu Dhabi uses the processing
+    # date, Dubai uses cancellation + 30 days. Recording it here means the rule
+    # is applied from registered configuration rather than inferred from text.
+    emirate: Mapped[str | None] = mapped_column(String(32))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    client: Mapped[Client] = relationship(back_populates="sub_groups")
+
+
+class LegalEntity(Base):
+    """A legal entity of a client.
+
+    `contract_name` is the exact literal the insurer's template expects in its
+    Contract Name dropdown -- spelling and spacing included, defects and all.
+    """
+
+    __tablename__ = "legal_entities"
+    __table_args__ = (UniqueConstraint("client_id", "name", name="uq_entity_per_client"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(191), nullable=False)
+    contract_name: Mapped[str | None] = mapped_column(String(191))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    client: Mapped[Client] = relationship(back_populates="legal_entities")
+
+
+class ClientPolicy(Base):
+    """An insurer policy held by a client, and the template it exports to."""
+
+    __tablename__ = "client_policies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False)
+    legal_entity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("legal_entities.id"))
+
+    insurer: Mapped[str] = mapped_column(String(128), nullable=False)
+    network: Mapped[str | None] = mapped_column(String(128))
+    policy_no: Mapped[str | None] = mapped_column(String(64))
+    category: Mapped[str | None] = mapped_column(String(64))
+    emirate: Mapped[str | None] = mapped_column(String(32))
+    addition_template_key: Mapped[str | None] = mapped_column(String(64))
+    deletion_template_key: Mapped[str | None] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    client: Mapped[Client] = relationship(back_populates="policies")
+    legal_entity: Mapped[LegalEntity | None] = relationship()
 
 
 class Case(Base):
@@ -113,6 +209,13 @@ class Case(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     reference: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+
+    # Denormalised names are kept alongside the foreign keys so a closed case
+    # still reads correctly if a client is later renamed in the master.
+    client_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("clients.id"))
+    sub_group_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("sub_groups.id"))
+    legal_entity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("legal_entities.id"))
+    client_policy_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("client_policies.id"))
 
     client_name: Mapped[str] = mapped_column(String(128), nullable=False)
     sub_group: Mapped[str | None] = mapped_column(String(128))
