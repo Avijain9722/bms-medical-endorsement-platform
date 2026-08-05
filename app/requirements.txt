@@ -1,0 +1,14 @@
+# Runtime dependencies for the BMS endorsement platform prototype.
+#
+# The template-preservation core (bms/ooxml, bms/registry) deliberately has no
+# dependencies at all -- general-purpose spreadsheet libraries rewrite parts they
+# do not understand, which is the one thing this application must never do.
+
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+SQLAlchemy>=2.0
+Jinja2>=3.1
+
+# PostgreSQL driver. Not needed for the SQLite prototype; install for production.
+# psycopg[binary]>=3.2

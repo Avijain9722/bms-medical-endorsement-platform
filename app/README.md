@@ -9,8 +9,15 @@ are immutable inputs. Nothing in this application writes to them.
 
 ## What is built so far
 
-**Phase 2 — template registry, fingerprinting and the OOXML surgical writer.**
-This is the riskiest part of the system, so it was built and proven first.
+**The template registry, fingerprinting and OOXML surgical writer** — the
+riskiest part of the system, built and proven first.
+
+**Phase 1 of the prototype** — a working internal web application: pasted client
+instructions, multi-file and ZIP upload, local OCR, member identification and
+document grouping, a member-level review screen with confidence and exception
+flags, persistent case storage, one NAS addition and one NAS deletion workflow,
+the approved New Log Format -2026 output, and an append-only audit trail.
+See [`docs/PROTOTYPE_SETUP.md`](../docs/PROTOTYPE_SETUP.md) to install and run it.
 
 | Module | Responsibility |
 | --- | --- |
@@ -19,6 +26,14 @@ This is the riskiest part of the system, so it was built and proven first.
 | `bms/ooxml/sheet.py` | Cell-level writes into `sheetData` only. Preserves the document's own namespace prefixes so no other element is rewritten. |
 | `bms/templates/specs.py` | The registered templates, with the column map, header row and first input row read out of each workbook. |
 | `bms/registry/generate.py` | Generates from a fresh copy of the master, then re-fingerprints and blocks release on any structural delta. |
+| `bms/models.py`, `bms/db.py`, `bms/storage.py` | PostgreSQL-ready schema, session handling, content-addressed file storage on disk. |
+| `bms/ocr/` | Pluggable local text extraction, rule-based field reading (MRZ with check digits, Emirates ID, UID, dates) and content-driven document classification. |
+| `bms/intake/` | Pasted-instruction parsing and safe archive expansion. |
+| `bms/matching/grouping.py` | Member identification, document grouping and principal linkage, each with a score and a reason. |
+| `bms/validation/rules.py` | Exception and confidence rules. Critical findings block export and cannot be overridden. |
+| `bms/outputs/` | NAS addition and deletion rows, the BMS log, and the per-template value maps. |
+| `bms/pipeline.py` | Case orchestration: intake, analysis, member building, review, export, retention purge. |
+| `bms/web/` | The internal application. Server-rendered, no state in the browser. |
 
 ## Why not openpyxl
 
@@ -40,7 +55,7 @@ all of it survives byte-for-byte — verified by test.
 cd app
 
 python3 tools/verify_sources.py     # supplied files unchanged?
-python3 -m pytest tests/ -q         # 41-test preservation suite
+python3 -m pytest tests/ -q         # full suite: preservation + application
 python3 -m tools.reports all        # readable evidence, not pass/fail
 ```
 
@@ -49,7 +64,12 @@ reports can be requested from the Actions tab. See
 [`docs/CI_PIPELINE.md`](../docs/CI_PIPELINE.md) for what each one covers and how
 to read a failure.
 
-41 tests run against the real supplied workbooks. The suite proves:
+**140 tests.** 41 of them run the preservation suite against the real supplied
+workbooks; the rest cover extraction, classification, instruction parsing,
+archive safety, grouping, the validation rules, the end-to-end case pipeline and
+the web tier.
+
+The preservation suite proves:
 
 - a generated workbook has **zero structural delta** from its master, for all nine
   registered templates;
@@ -77,11 +97,20 @@ to read a failure.
 - **Style prototypes.** New cells inherit the template's own format for their
   column; cells that already exist keep the style the template gave them.
 
+The application tests additionally prove that uploads survive a new database
+session, that identical files are deduplicated, that an unreadable document is
+flagged rather than silently skipped, that a member with a critical flag cannot
+be approved, that export is blocked while any critical flag is open, that
+corrections are audited with their previous value, and that the retention purge
+removes documents only after closure while keeping the record.
+
 ## Not yet built
 
-Phases 1 and 3–7 of the approved plan: the FastAPI application and PostgreSQL
-schema, case intake with the BMS Comments paste field, upload and ZIP extraction,
-local OCR and document classification, member matching and principal linkage, the
-review and exception workflow, supporting-document ZIPs, the 36-hour post-closure
-purge, and the Windows Excel recalculation worker used for the Daman and log
-hand-off (`ENGINE_RECALC`).
+- ADNIC, Sukoon and Daman workflows. The registry, value maps and specs already
+  describe them; only the row builders and their confirmed literals are missing.
+- The Windows Excel recalculation worker (`ENGINE_RECALC`) for the Daman and log
+  hand-off. Needs a Windows host with Excel.
+- Supporting-document ZIP packaging with a manifest.
+- Alembic migrations, background job queue, and a scheduled purge runner.
+- Client master, employee master and category mapping screens; these currently
+  live on the case rather than in a shared library.

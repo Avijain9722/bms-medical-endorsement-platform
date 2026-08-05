@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}{{ member.full_name or 'Member' }}{% endblock %}
+{% macro field(member, provenance, key, label, kind='text') %}
+  {% set meta = provenance.get(key) %}
+  <div>
+    <label for="{{ key }}">{{ label }}</label>
+    <input type="{{ kind }}" id="{{ key }}" name="{{ key }}" value="{{ member[key] or '' }}">
+    {% if meta %}
+      <div class="confidence {% if meta.confidence and meta.confidence < 0.75 %}low{% endif %}">
+        {% if meta.reviewed %}confirmed by {{ meta.source_name }}
+        {% else %}{{ '%.0f'|format((meta.confidence or 0) * 100) }}% from {{ meta.source_name }}{% endif %}
+      </div>
+    {% endif %}
+  </div>
+{% endmacro %}
+{% block content %}
+<p class="muted"><a href="/cases/{{ case.id }}">&larr; {{ case.reference }}</a></p>
+<h1>{{ member.full_name or '(unnamed member)' }}</h1>
+
+{% for flag in flags %}
+  <div class="flag sev-{{ flag.severity }}">
+    <strong>{{ flag.severity.replace('_',' ') }}</strong> &mdash; {{ flag.message }}
+  </div>
+{% endfor %}
+
+<form method="post" action="/cases/{{ case.id }}/members/{{ member.id }}">
+  <div class="card">
+    <h2>Identity</h2>
+    <div class="grid three">
+      {{ field(member, provenance, 'first_name', 'First name') }}
+      {{ field(member, provenance, 'middle_name', 'Middle name') }}
+      {{ field(member, provenance, 'last_name', 'Last name') }}
+      {{ field(member, provenance, 'date_of_birth', 'Date of birth (YYYY-MM-DD)') }}
+      {{ field(member, provenance, 'gender', 'Gender') }}
+      {{ field(member, provenance, 'nationality', 'Nationality') }}
+      {{ field(member, provenance, 'marital_status', 'Marital status') }}
+    </div>
+  </div>
+  <div class="card">
+    <h2>Identification</h2>
+    <div class="grid three">
+      {{ field(member, provenance, 'passport_no', 'Passport no.') }}
+      {{ field(member, provenance, 'passport_expiry', 'Passport expiry') }}
+      {{ field(member, provenance, 'emirates_id', 'Emirates ID') }}
+      {{ field(member, provenance, 'unified_no', 'Unified no. (UID)') }}
+      {{ field(member, provenance, 'visa_file_number', 'Visa file number') }}
+      {{ field(member, provenance, 'birth_certificate_number', 'Birth certificate no.') }}
+    </div>
+  </div>
+  <div class="card">
+    <h2>Policy and family</h2>
+    <div class="grid three">
+      {{ field(member, provenance, 'staff_id', 'Staff ID') }}
+      {{ field(member, provenance, 'relation', 'Relation') }}
+      {{ field(member, provenance, 'category', 'Category') }}
+      {{ field(member, provenance, 'contract_name', 'Contract name') }}
+      {{ field(member, provenance, 'effective_date', 'Effective date') }}
+      {{ field(member, provenance, 'principal_card_no', 'Principal card no.') }}
+      {{ field(member, provenance, 'member_card_no', 'Member card no.') }}
+      {{ field(member, provenance, 'deletion_reason', 'Deletion reason') }}
+      {{ field(member, provenance, 'email', 'Email') }}
+      {{ field(member, provenance, 'mobile_no', 'Mobile no.') }}
+    </div>
+  </div>
+  <p>
+    <button type="submit">Save corrections</button>
+  </p>
+</form>
+
+<form method="post" action="/cases/{{ case.id }}/members/{{ member.id }}/approve">
+  <button type="submit" class="secondary">Approve this member</button>
+  <span class="muted">Approval is refused while a critical issue is open.</span>
+</form>
+
+<div class="card">
+  <h2>Documents</h2>
+  {% if documents %}
+  <table>
+    <tr><th>File</th><th>Type</th><th>Source</th><th>Status</th></tr>
+    {% for doc in documents %}
+    <tr>
+      <td>{{ doc.original_name }}</td>
+      <td>{{ doc.document_type }}</td>
+      <td class="muted">{{ doc.text_source or '&mdash;' }}</td>
+      <td>{{ doc.status }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">No documents grouped to this member.</p>{% endif %}
+</div>
+{% endblock %}

@@ -45,10 +45,13 @@ jobs:
           python-version: "3.11"
 
       # The preservation core is standard library only, by design: general
-      # purpose spreadsheet libraries rewrite parts they do not understand.
-      # pytest is the only test-time dependency.
-      - name: Install test dependencies
-        run: python3 -m pip install --quiet pytest
+      # purpose spreadsheet libraries rewrite parts they do not understand. The
+      # application tier adds FastAPI and SQLAlchemy, and the tests add pytest
+      # and httpx. Local OCR engines are deliberately NOT installed here -- the
+      # suite proves the pipeline degrades honestly without them.
+      - name: Install dependencies
+        run: python3 -m pip install --quiet -r requirements-dev.txt
+        working-directory: app
 
       - name: Run preservation suite
         run: python3 -m pytest tests -q --junit-xml=../test-results.xml

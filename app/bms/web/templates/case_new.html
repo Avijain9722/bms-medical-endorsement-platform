@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}New case{% endblock %}
+{% block content %}
+<h1>New case</h1>
+<form method="post" action="/cases" class="card grid two">
+  <div><label for="client_name">Client *</label><input type="text" id="client_name" name="client_name" required></div>
+  <div><label for="sub_group">Sub-group</label><input type="text" id="sub_group" name="sub_group"></div>
+  <div><label for="insurer">Insurer / TPA *</label><input type="text" id="insurer" name="insurer" required></div>
+  <div><label for="policy_no">Policy no.</label><input type="text" id="policy_no" name="policy_no"></div>
+  <div><label for="contract_name">Contract name</label><input type="text" id="contract_name" name="contract_name"></div>
+  <div><label for="category">Category</label><input type="text" id="category" name="category"></div>
+  <div>
+    <label for="transaction_type">Transaction type *</label>
+    <select id="transaction_type" name="transaction_type">
+      <option value="addition">Addition</option>
+      <option value="deletion">Deletion</option>
+    </select>
+  </div>
+  <div>
+    <label for="template_key">Output template</label>
+    <select id="template_key" name="template_key">
+      <option value="">Choose at export</option>
+      {% for key in templates_available %}<option value="{{ key }}">{{ key }}</option>{% endfor %}
+    </select>
+  </div>
+  <div><label for="email_subject">Email subject</label><input type="text" id="email_subject" name="email_subject"></div>
+  <div><label for="email_received_date">Email received</label><input type="datetime-local" id="email_received_date" name="email_received_date"></div>
+  <div style="grid-column:1/-1">
+    <label for="bms_comments">BMS Comments &mdash; paste the client email body</label>
+    <textarea id="bms_comments" name="bms_comments" placeholder="Paste the relevant client email body here. The platform never reads a mailbox."></textarea>
+  </div>
+  <div style="grid-column:1/-1"><button type="submit">Create case</button> <a class="btn secondary" href="/">Cancel</a></div>
+</form>
+{% endblock %}
