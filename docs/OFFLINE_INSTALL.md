@@ -80,10 +80,21 @@ python.org first; on Windows tick **"Add Python to PATH"** during setup.
 
 ## Verifying it worked
 
+One command does both checks, installing the test tooling from the bundle
+first (the runtime install deliberately does not carry pytest):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\verify.ps1     # Windows
+```
+
 ```bash
-cd app && python3 tools/verify_sources.py     # supplied workbooks unaltered
-python3 -m pytest tests -q                    # 246 tests, no internet needed
-curl -s http://127.0.0.1:8000/health          # what this host can and cannot do
+./deploy/verify.sh                                             # Linux
+```
+
+And to see what the host can actually do:
+
+```bash
+curl -s http://127.0.0.1:8000/health
 ```
 
 The test suite runs entirely offline. It is worth running once on the BMS host,
