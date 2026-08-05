@@ -1,0 +1,28 @@
+./00_START_HERE/ATTACHMENT_MANIFEST.md
+./00_START_HERE/CLAUDE_PROJECT_SETUP.md
+./00_START_HERE/CLAUDE_START_COMMAND.md
+./00_START_HERE/FILE_LIST.txt
+./00_START_HERE/MASTER_DEVELOPMENT_PROMPT.md
+./00_START_HERE/MISSING_INPUTS_CHECKLIST.md
+./00_START_HERE/README.md
+./00_START_HERE/SHA256SUMS.txt
+./01_BRAND_ASSETS/BMS Brand Guidelines - v1.3 (2)(4).docx
+./01_BRAND_ASSETS/BMS-Masaood-Logo-Negative-RGB.png
+./01_BRAND_ASSETS/BMS-Masaood-Logo-Positive-RGB.png
+./02_PORTAL_TEMPLATES/ADNIC MemberEnrollment Form.xlsx
+./02_PORTAL_TEMPLATES/ADNIC MemberTermination Form.xlsx
+./02_PORTAL_TEMPLATES/DAMAN Addition Template.xlsm
+./02_PORTAL_TEMPLATES/NAS DeleteEmployees.xlsx
+./02_PORTAL_TEMPLATES/NAS- ALDAR- Addition RequestTemplate.xlsx
+./02_PORTAL_TEMPLATES/NAS- IFFCO- Addition RequestTemplate.xlsx
+./02_PORTAL_TEMPLATES/NASHRRequestTemplateNew(1).xlsx
+./02_PORTAL_TEMPLATES/Sukoon Member-addition sheet.xlsx
+./03_INTERNAL_LOG_TEMPLATE/New Log Format -2026.xlsx
+./04_DEVELOPMENT_EXAMPLES/Addition to medical insurance - CAT B Policy- T1225.eml
+./04_DEVELOPMENT_EXAMPLES/Addition to medical insurance - Daman Basic Policy T1226.eml
+./04_DEVELOPMENT_EXAMPLES/Alina Bou Mansour and Arnell Martin - Addition - North London Collegiate School.eml
+./04_DEVELOPMENT_EXAMPLES/Basatin Deletion-Pashupati Mandal.eml
+./04_DEVELOPMENT_EXAMPLES/Basatin Dependent Addition-82270.eml
+./04_DEVELOPMENT_EXAMPLES/FW - Need Health Insurance - New Born Baby - 81411 - Ahtsham Ali.eml
+./04_DEVELOPMENT_EXAMPLES/RE - Insurance addition-02 Overseas hiring under Khidmah.eml
+./05_TECHNICAL_REFERENCE/NAS_Portal_Field_Guide.md
