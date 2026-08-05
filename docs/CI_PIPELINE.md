@@ -114,6 +114,15 @@ file is deleted rather than released.
 Go to **Actions → Reports → Run workflow**, choose what you want, and press the
 green button.
 
+> **If "Reports" is not in the Actions list yet:** GitHub only offers a
+> manually-triggered workflow once its file exists on the default branch. Until
+> the pull request that introduces `reports.yml` is merged into `main`, the entry
+> will not appear and the API returns `404`. This is a GitHub rule, not a problem
+> with the workflow. In the meantime, run the same reports locally — see
+> [Running everything locally](#running-everything-locally). The **Tests**
+> workflow is unaffected and runs on branches straight away, because `push` and
+> `pull_request` events do not have this restriction.
+
 ### Options
 
 | Input | Meaning | Default |
