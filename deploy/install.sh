@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Install the BMS endorsement platform on a Linux host.
+#
+# Creates a virtual environment, installs dependencies, applies migrations and
+# checks what the host can actually do. Safe to re-run: it upgrades in place.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP="$(cd "$HERE/../app" && pwd)"
+cd "$APP"
+
+echo "==> Python"
+python3 --version
+python3 - <<'PY'
+import sys
+if sys.version_info < (3, 11):
+    raise SystemExit("Python 3.11 or newer is required")
+PY
+
+echo "==> Virtual environment"
+[ -d .venv ] || python3 -m venv .venv
+# shellcheck disable=SC1091
+source .venv/bin/activate
+python -m pip install --quiet --upgrade pip
+python -m pip install --quiet -r requirements.txt
+
+echo "==> Configuration"
+if [ ! -f "$APP/.env" ]; then
+    cp "$HERE/.env.example" "$APP/.env"
+    echo "    created app/.env -- edit it before starting (BMS_SECRET_KEY is required)"
+else
+    echo "    app/.env already present, left unchanged"
+fi
+
+echo "==> Database"
+set -a; [ -f "$APP/.env" ] && . "$APP/.env"; set +a
+python -m alembic upgrade head
+
+echo "==> Host capabilities"
+python - <<'PY'
+from bms.intake import scanning
+from bms.ocr.text import TextPipeline
+from bms.outputs import recalc
+
+engines = TextPipeline().available_engines()
+print(f"    OCR engines        : {', '.join(engines) or 'NONE -- scans must be typed in by hand'}")
+scan = scanning.describe_host()
+print(f"    Virus scanning     : {scan['engine'] or 'NONE -- uploads recorded as unscanned'}")
+calc = recalc.describe_host()
+print(f"    Excel recalculation: {'yes' if calc['excel_recalculation'] else 'no -- ' + calc['reason']}")
+PY
+
+echo
+echo "Install complete."
+echo "  Start:  cd app && source .venv/bin/activate && uvicorn bms.web.app:app --host 127.0.0.1 --port 8000"
+echo "  Or:     sudo cp deploy/bms-endorsements.service /etc/systemd/system/ && sudo systemctl enable --now bms-endorsements"
