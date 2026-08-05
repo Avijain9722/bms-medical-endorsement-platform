@@ -35,6 +35,25 @@ Zero skips is the number to look at. Nothing was quietly stepped over because
 the host lacked something; where a capability is missing, the test asserts the
 *degradation* instead of being skipped.
 
+### Independently reproduced in CI
+
+The same commit was run on a clean GitHub-hosted Ubuntu runner — a fresh
+machine, dependencies installed from `requirements-dev.txt`, no OCR engines, no
+ClamAV and no Excel:
+
+| | |
+| --- | --- |
+| Run | [`31029628219`](https://github.com/Avijain9722/bms-medical-endorsement-platform/actions/runs/31029628219) |
+| Source integrity job | **success** — supplied workbooks match `SHA256SUMS.txt` |
+| Template preservation job | **success** — 246 tests, 126s |
+| Artifact | `test-results.xml` attached to the run |
+
+Both jobs also passed on the `push` event for the same commit. Every commit on
+the branch has run the full suite; all fifteen runs are green.
+
+The local run and the CI run agree, which rules out anything specific to the
+development container.
+
 ## 2. By area
 
 | Tests | Time | Module | What it covers |
