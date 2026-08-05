@@ -548,3 +548,55 @@ def test_log_screen_and_event_recording_through_the_ui(session, user, env):
     download = http.post("/log/export", data={"date_from": "", "date_to": ""})
     assert download.status_code == 200
     assert download.content[:2] == b"PK"
+
+
+def test_status_and_remarks_can_be_saved_through_the_ui(session, user, env):
+    """The row editor and the filter both carry a `status` field.
+
+    Browsers scope a submit to its own form, but this asserts the route itself,
+    so an editor that stopped saving would fail here rather than being mistaken
+    for a filter.
+    """
+    exported_case(session, user, env)
+    session.commit()
+
+    http = TestClient(web_app.app, follow_redirects=False)
+    http.post("/login", data={"username": "tester", "password": "a-long-test-password"})
+
+    with db.session_scope() as fresh:
+        entry_id = fresh.scalars(select(LogEntry)).one().id
+
+    saved = http.post(
+        f"/log/{entry_id}/fields",
+        data={"status": "BOOKED", "remarks": "Invoice raised", "remarks2": ""},
+    )
+    assert saved.status_code == 303
+
+    with db.session_scope() as fresh:
+        entry = fresh.get(LogEntry, entry_id)
+        assert entry.status == "BOOKED"
+        assert entry.remarks == "Invoice raised"
+
+    rejected = http.post(
+        f"/log/{entry_id}/fields", data={"status": "INVOICED", "remarks": "", "remarks2": ""}
+    )
+    assert rejected.status_code == 400
+    with db.session_scope() as fresh:
+        assert fresh.get(LogEntry, entry_id).status == "BOOKED"
+
+
+def test_filtering_by_status_does_not_alter_any_entry(session, user, env):
+    """A filter is a query. It must never write."""
+    exported_case(session, user, env)
+    session.commit()
+
+    http = TestClient(web_app.app, follow_redirects=False)
+    http.post("/login", data={"username": "tester", "password": "a-long-test-password"})
+
+    with db.session_scope() as fresh:
+        before = fresh.scalars(select(LogEntry)).one().status
+
+    assert http.get("/log", params={"status": "BOOKED"}).status_code == 200
+
+    with db.session_scope() as fresh:
+        assert fresh.scalars(select(LogEntry)).one().status == before
