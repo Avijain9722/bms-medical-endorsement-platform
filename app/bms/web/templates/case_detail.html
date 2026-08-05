@@ -136,9 +136,16 @@
   <h2>Case</h2>
   <p>
     <a class="btn secondary" href="/audit?case_id={{ case.id }}">View audit trail</a>
+    {% if case.status == 'closed' %}
+    <form method="post" action="/cases/{{ case.id }}/reopen" class="inline">
+      <button class="secondary">Reopen case</button>
+    </form>
+    {% else %}
     <form method="post" action="/cases/{{ case.id }}/close" class="inline">
       <button class="secondary">Close case</button>
     </form>
+    {% endif %}
+    <a class="btn secondary" href="/log">Operational log</a>
     <span class="muted">Closing starts the document retention clock. Records and the audit trail are kept.</span>
   </p>
 </div>

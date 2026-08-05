@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from .. import pipeline
 from ..config import settings
 from ..db import create_all, get_session, init_engine
-from .. import master
+from .. import logbook, master
 from ..models import (
     AuditEvent,
     Case,
@@ -31,6 +31,7 @@ from ..models import (
     DocumentType,
     Export,
     LegalEntity,
+    LogEntry,
     Member,
     ReviewFlag,
     Severity,
@@ -38,6 +39,7 @@ from ..models import (
     TransactionType,
     User,
 )
+from ..outputs import log as log_output
 from ..outputs.nas import SUPPORTED_KEYS
 from ..storage import ExportStorage
 from .security import COOKIE_NAME, hash_password, issue_session, read_session, verify_password
@@ -898,3 +900,176 @@ async def admin_import_clients(
         f"/admin?imported={summary.rows_read} rows, {summary.total_created} record(s) created",
         status_code=303,
     )
+
+
+# ---------------------------------------------------------- operational log
+
+
+def _parse_date(value: str | None):
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+@app.get("/log", response_class=HTMLResponse)
+def log_screen(
+    request: Request,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    client_name: str | None = None,
+    insurer: str | None = None,
+    status: str | None = None,
+    entry_type: str | None = None,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    criteria = logbook.LogFilter(
+        date_from=_parse_date(date_from),
+        date_to=_parse_date(date_to),
+        client_name=client_name or None,
+        insurer=insurer or None,
+        status=status or None,
+        entry_type=entry_type or None,
+    )
+    entries = logbook.query(session, criteria, limit=1000)
+    cases = {
+        case.id: case
+        for case in session.scalars(select(Case).where(Case.id.in_({e.case_id for e in entries})))
+    } if entries else {}
+
+    return render(
+        request,
+        "log.html",
+        user=user,
+        entries=entries,
+        cases=cases,
+        criteria=criteria,
+        filters={
+            "date_from": date_from or "",
+            "date_to": date_to or "",
+            "client_name": client_name or "",
+            "insurer": insurer or "",
+            "status": status or "",
+            "entry_type": entry_type or "",
+        },
+        clients=logbook.distinct_values(session, LogEntry.client_name),
+        insurers=logbook.distinct_values(session, LogEntry.insurer),
+        entry_types=logbook.distinct_values(session, LogEntry.entry_type),
+        statuses=logbook.LOG_STATUSES,
+        events=log_output.RECORDABLE_EVENTS,
+    )
+
+
+@app.post("/log/export")
+def log_export(
+    date_from: str = Form(""),
+    date_to: str = Form(""),
+    client_name: str = Form(""),
+    insurer: str = Form(""),
+    status: str = Form(""),
+    entry_type: str = Form(""),
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    criteria = logbook.LogFilter(
+        date_from=_parse_date(date_from),
+        date_to=_parse_date(date_to),
+        client_name=client_name or None,
+        insurer=insurer or None,
+        status=status or None,
+        entry_type=entry_type or None,
+    )
+    download = logbook.export_range(session, criteria, actor=user.username, config=settings)
+    path = ExportStorage(settings).absolute(download.relative_path)
+    return FileResponse(path, filename=download.filename)
+
+
+@app.post("/log/{entry_id}/event")
+def log_record_event(
+    entry_id: str,
+    event: str = Form(...),
+    request_ref_no: str = Form(""),
+    request_sent_date_to_insurer: str = Form(""),
+    card_no: str = Form(""),
+    card_receive_and_sent_date: str = Form(""),
+    saiba_voucher_no: str = Form(""),
+    bbm_invoice_date: str = Form(""),
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """Record a post-submission event against a log row.
+
+    The six columns start blank and stay blank until one of these actions is
+    taken, which may be days after the case was exported. Only the fields the
+    event owns are passed through; the rest are ignored.
+    """
+    entry = session.get(LogEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+
+    supplied = {
+        "request_ref_no": request_ref_no,
+        "request_sent_date_to_insurer": request_sent_date_to_insurer,
+        "card_no": card_no,
+        "card_receive_and_sent_date": card_receive_and_sent_date,
+        "saiba_voucher_no": saiba_voucher_no,
+        "bbm_invoice_date": bbm_invoice_date,
+    }
+    allowed = log_output.RECORDABLE_EVENTS.get(event)
+    if allowed is None:
+        raise HTTPException(status_code=400, detail=f"{event!r} is not a recognised event")
+
+    values = {key: value for key, value in supplied.items() if key in allowed and value.strip()}
+    if not values:
+        raise HTTPException(status_code=400, detail="Nothing was entered for this event.")
+
+    try:
+        logbook.apply_event(session, entry, event, values, actor=user.username)
+    except log_output.NotRecordable as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return RedirectResponse(request_referer_or("/log"), status_code=303)
+
+
+@app.post("/log/{entry_id}/fields")
+def log_update_fields(
+    entry_id: str,
+    status: str = Form(""),
+    remarks: str = Form(""),
+    remarks2: str = Form(""),
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """Edit the operator-owned columns: Status, REMARKS and Remarks2."""
+    entry = session.get(LogEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+    try:
+        logbook.update_fields(
+            session,
+            entry,
+            {"status": status, "remarks": remarks, "remarks2": remarks2},
+            actor=user.username,
+        )
+    except logbook.NotPermitted as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return RedirectResponse(request_referer_or("/log"), status_code=303)
+
+
+@app.post("/cases/{case_id}/reopen")
+def reopen(
+    case_id: str,
+    reason: str = Form(""),
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """Reopen a closed case so later information can still be recorded."""
+    case = _load_case(session, case_id)
+    logbook.reopen_case(session, case, actor=user.username, reason=reason or None)
+    return RedirectResponse(f"/cases/{case_id}", status_code=303)
+
+
+def request_referer_or(default: str) -> str:
+    return default

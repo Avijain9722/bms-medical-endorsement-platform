@@ -37,7 +37,9 @@ from .ocr.fields import extract_fields
 from .ocr.text import TextPipeline
 from .outputs import log as log_output
 from .outputs import nas as nas_output
+from .outputs import package as package_output
 from .storage import ExportStorage, Storage
+from .templates.specs import SPECS_BY_KEY
 from .validation.rules import (
     NEWBORN_PLACEHOLDER,
     NO_SURNAME_MARKER,
@@ -725,6 +727,32 @@ def export_case(
     export_storage = ExportStorage(config)
     work_dir = config.data_root / "tmp"
     work_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(config)
+
+    # --- supporting documents ------------------------------------------------
+    # Built first: the packager decides the filenames, and the workbook's
+    # attachment columns must carry exactly those names for the insurer to match
+    # each document to its member.
+    documents_by_member = {
+        member.id: list(
+            session.scalars(select(CaseFile).where(CaseFile.member_id == member.id))
+        )
+        for member in approved
+    }
+    package = package_output.build(
+        approved,
+        documents_by_member,
+        read_bytes=storage.get_bytes,
+        case_reference=case.reference,
+        first_data_row=SPECS_BY_KEY[template_key].first_data_row,
+    )
+    attachments = {
+        member.id: {
+            "photo": package.photo_names.get(member.id),
+            "declaration": package.declaration_names.get(member.id),
+        }
+        for member in approved
+    }
 
     # --- portal workbook -----------------------------------------------------
     suffix = ".xlsx"
@@ -734,6 +762,7 @@ def export_case(
         approved,
         repo_root=config.template_root,
         output=portal_path,
+        attachments=attachments,
     )
     portal_bytes = portal_path.read_bytes()
     portal_name = f"{case.reference}-{template_key}{suffix}"
@@ -749,6 +778,25 @@ def export_case(
         row_count=len(built.rows),
     )
     session.add(portal_export)
+
+    # --- supporting-document ZIP --------------------------------------------
+    package_export = None
+    if package.file_count:
+        package_name = f"{case.reference}-supporting-documents.zip"
+        package_relative, package_digest = export_storage.write(
+            case.reference, package_name, package.data
+        )
+        package_export = Export(
+            case_id=case.id,
+            kind="zip",
+            template_key=None,
+            filename=package_name,
+            relative_path=package_relative,
+            sha256=package_digest,
+            fingerprint_ok=True,
+            row_count=package.file_count,
+        )
+        session.add(package_export)
 
     # --- BMS log -------------------------------------------------------------
     shared_by = _shared_by(session, case)
@@ -793,6 +841,8 @@ def export_case(
             "log_rows": log_result.row_count,
             "portal_sha256": digest,
             "log_sha256": log_digest,
+            "package_files": package.file_count,
+            "package_skipped": len(package.skipped),
         },
     )
     return portal_export, log_export

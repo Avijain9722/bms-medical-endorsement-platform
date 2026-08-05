@@ -81,6 +81,7 @@ form.inline { display: inline; }
   <nav>
     {% if user %}
       <a href="/">Cases</a>
+      <a href="/log">Log</a>
       <a href="/audit">Audit</a>
       {% if user.is_admin %}<a href="/admin">Administration</a>{% endif %}
       <span class="muted" style="color:#cfd6e0">{{ user.display_name }}</span>
