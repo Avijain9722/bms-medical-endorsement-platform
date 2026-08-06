@@ -17,6 +17,7 @@ being presented as finished.
 
 from __future__ import annotations
 
+import functools
 import logging
 import platform
 import shutil
@@ -42,8 +43,14 @@ class RecalcResult:
         return not self.performed
 
 
+@functools.lru_cache(maxsize=1)
 def excel_available() -> tuple[bool, str]:
     """Whether a local Excel automation route exists on this host.
+
+    Cached: Excel is not installed or uninstalled while the process runs, and
+    the probe now costs a COM initialise plus a registry lookup on Windows --
+    paid on every /health request and once per exported file. `cache_clear()`
+    exists for the tests.
 
     pywin32 importing proves only that the bridge is installed, not that there is
     anything on the other side of it. A Windows host with pywin32 and no Excel --

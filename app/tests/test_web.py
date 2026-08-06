@@ -751,3 +751,40 @@ def test_the_token_is_not_guessable_from_the_session_id(client):
     assert cookie not in token
     assert len(token) == 64
     assert csrf_token(cookie + "x") != token
+
+
+def test_the_login_throttle_cannot_be_used_to_exhaust_memory(client):
+    """The tracking must not become the denial of service it prevents.
+
+    Every distinct username tried creates an entry and the attacker chooses the
+    usernames, so an unbounded table is memory exhaustion by unauthenticated
+    request. Measured at 50,000 distinct names before the cap existed.
+    """
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for index in range(security.MAX_TRACKED_KEYS * 3):
+            security.record_failure(f"user:flood-{index}")
+        assert len(security._failures) <= security.MAX_TRACKED_KEYS
+    finally:
+        security.reset_throttle()
+
+
+def test_a_real_lockout_survives_a_flood_of_other_names(client):
+    """Eviction must not become a way to clear your own lockout."""
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for _ in range(security.FAILURE_LIMIT):
+            security.record_failure("user:victim")
+        assert security.locked_out("user:victim") > 0
+
+        for index in range(security.MAX_TRACKED_KEYS * 3):
+            security.record_failure(f"user:noise-{index}")
+
+        assert security.locked_out("user:victim") > 0, "a lockout must not be evictable"
+        assert len(security._failures) <= security.MAX_TRACKED_KEYS
+    finally:
+        security.reset_throttle()

@@ -112,8 +112,57 @@ FAILURE_LIMIT = 5
 FAILURE_WINDOW_SECONDS = 15 * 60
 LOCKOUT_SECONDS = 15 * 60
 
+# The tracking itself must not become the denial of service it prevents. Each
+# distinct username tried creates an entry, and an attacker chooses the
+# usernames -- so without a bound, guessing random names grows the process until
+# it dies. Entries older than the window are worthless, so they are swept
+# periodically, and a hard cap backstops a burst that outruns the sweep.
+MAX_TRACKED_KEYS = 10_000
+SWEEP_INTERVAL_SECONDS = 60
+
 _failures: dict[str, list[float]] = {}
 _locked_until: dict[str, float] = {}
+_last_sweep = 0.0
+
+
+def _sweep(now: float) -> None:
+    """Drop everything that can no longer affect a decision."""
+    global _last_sweep
+    if now - _last_sweep < SWEEP_INTERVAL_SECONDS:
+        return
+    _last_sweep = now
+
+    for key in [k for k, until in _locked_until.items() if until <= now]:
+        _locked_until.pop(key, None)
+    for key in list(_failures):
+        if key in _locked_until:
+            continue
+        recent = [t for t in _failures[key] if now - t < FAILURE_WINDOW_SECONDS]
+        if recent:
+            _failures[key] = recent
+        else:
+            del _failures[key]
+
+
+def _enforce_cap() -> None:
+    """Hard bound on tracked keys, checked on every failure.
+
+    The periodic sweep cannot be the only bound: it is rate-limited, and an
+    attacker sending tens of thousands of distinct usernames inside one interval
+    outruns it entirely. This is a cheap length check on the common path, and
+    only does work when the cap is actually exceeded. Locked-out keys are the
+    ones still doing useful work, so they are kept and the least recently active
+    of the rest are dropped first.
+    """
+    overflow = len(_failures) - MAX_TRACKED_KEYS
+    if overflow <= 0:
+        return
+    droppable = sorted(
+        (k for k in _failures if k not in _locked_until),
+        key=lambda k: _failures[k][-1],
+    )
+    for key in droppable[:overflow]:
+        del _failures[key]
 
 
 def _prune(key: str, now: float) -> None:
@@ -139,10 +188,12 @@ def locked_out(key: str, *, now: float | None = None) -> int:
 
 def record_failure(key: str, *, now: float | None = None) -> None:
     now = time.time() if now is None else now
+    _sweep(now)
     _prune(key, now)
     _failures.setdefault(key, []).append(now)
     if len(_failures[key]) >= FAILURE_LIMIT:
         _locked_until[key] = now + LOCKOUT_SECONDS
+    _enforce_cap()
 
 
 def record_success(key: str) -> None:
@@ -152,8 +203,10 @@ def record_success(key: str) -> None:
 
 def reset_throttle() -> None:
     """Test helper: forget all recorded failures."""
+    global _last_sweep
     _failures.clear()
     _locked_until.clear()
+    _last_sweep = 0.0
 
 
 # ---------------------------------------------------------------------- CSRF
