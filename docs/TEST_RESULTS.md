@@ -3,7 +3,7 @@
 The recorded run of the automated suite for the delivered build.
 
 ```
-284 tests · 0 failures · 0 errors · 0 skipped · 140.5s
+297 tests · 0 failures · 0 errors · 0 skipped · 187.0s
 ```
 
 Reproduce it with:
@@ -20,8 +20,8 @@ python3 -m pytest tests -q
 
 | | |
 | --- | --- |
-| Date | 2026-08-05 17:02 UTC |
-| Commit | `b590ae1` on `claude/bms-phase1-prototype` |
+| Date | 2026-08-06 12:20 UTC |
+| Commit | `c13b35f` on `claude/bms-install-version-check` |
 | Python | 3.11.15 |
 | Platform | Linux x86-64, glibc 2.39 |
 | Database | SQLite (per-test temporary files) |
@@ -29,7 +29,7 @@ python3 -m pytest tests -q
 | Tesseract | 5.3.4, bundled at `vendor/tesseract/` — see §4 |
 | ClamAV | **not installed** — deliberate, see §4 |
 | Microsoft Excel | **not available** — Linux host, see §4 |
-| Result | **284 passed, 0 failed, 0 errored, 0 skipped** |
+| Result | **297 passed, 0 failed, 0 errored, 0 skipped** |
 
 Zero skips is the number to look at. Nothing was quietly stepped over because
 the host lacked something; where a capability is missing, the test asserts the
@@ -48,42 +48,61 @@ covered. This run bundled Tesseract 5.3.4 into `vendor/tesseract/` and confirmed
 
 Six tests were added to cover the resolution order, the language-file handling
 and the absolute-path detection. Later work on paging, page weight and the
-export-refusal branches took it to 267.
+export-refusal branches took it to 267, and the stabilisation pass to 297.
 
-### Independently reproduced in CI
+### What the stabilisation pass added
 
-The same commit was run on a clean GitHub-hosted Ubuntu runner — a fresh
-machine, dependencies installed from `requirements-dev.txt`, no OCR engines, no
-ClamAV and no Excel:
+Eleven tests, each confirmed to fail against the code before it:
 
-| | |
-| --- | --- |
-| Run | [`31029628219`](https://github.com/Avijain9722/bms-medical-endorsement-platform/actions/runs/31029628219) |
-| Source integrity job | **success** — supplied workbooks match `SHA256SUMS.txt` |
-| Template preservation job | **success** — 246 tests, 126s (before the OCR bundling work) |
-| Artifact | `test-results.xml` attached to the run |
+- sign-out submitted with only the fields the rendered page actually contains,
+  which is what the previous CSRF test could not see;
+- every POST form checked for a token *inside its own tags*, not merely
+  somewhere in the same file;
+- an error message that quotes user input reflected as escaped text, not markup;
+- the administrator client-master import bounded like every other upload;
+- the content-security policy refusing inline script, and no template carrying
+  any;
+- the stylesheet and script served as cacheable files that answer 304;
+- a case reference not reissued after a case is deleted, and a collision retried
+  rather than raised;
+- both export paths leaving no scratch workbook behind;
+- a refused export leaving no half-written record;
+- the refusal screen and the case screen agreeing on export order;
+- reprocessing issuing a query count that does not grow with the batch.
 
-Both jobs also passed on the `push` event for the same commit. Every commit on
-the branch has run the full suite; all fifteen runs are green.
+### Also run on the deployment target
 
-The local run and the CI run agree, which rules out anything specific to the
+The Windows package pins Python 3.14, so the suite is run there too rather than
+only on the development host's 3.11. Locally, on a 3.14 interpreter with
+`DeprecationWarning` promoted to an error:
+
+```
+297 passed
+```
+
+CI runs the same suite on `windows-latest` under both 3.12 and 3.14, and
+separately runs `install.ps1`, `verify.ps1` and the live platform on 3.14 —
+because a green suite says nothing about whether the installer works. Every
+commit on the branch runs all five jobs.
+
+The local run and the CI run agreeing is what rules out anything specific to the
 development container.
 
 ## 2. By area
 
 | Tests | Time | Module | What it covers |
 | ---: | ---: | --- | --- |
-| 46 | 1.7s | `test_all_templates.py` | Every registered insurer template generated end to end. Each binding's columns must exist in the real workbook, each literal must be one that template's own dropdowns accept, and the output must still match its fingerprint |
-| 41 | 32.8s | `test_template_preservation.py` | The central promise: a generated portal file differs from its master only in the member rows deliberately written |
-| 28 | 91.5s | `test_logbook_and_package.py` | The operational log workflow — statuses, date-range export, post-submission events — and supporting-document ZIP packaging with its manifest |
-| 27 | 11.8s | `test_pipeline.py` | End-to-end case processing against a real database and the real workbooks |
-| 27 | <0.1s | `test_matching_and_rules.py` | Member grouping, principal/dependant linkage and every validation rule |
+| 48 | 58.9s | `test_web.py` | The web tier through the real ASGI app — routing, templates, session cookie, paging, page weight, the CSRF guard, the content-security policy and every export-refusal branch |
+| 46 | 1.6s | `test_all_templates.py` | Every registered insurer template generated end to end. Each binding's columns must exist in the real workbook, each literal must be one that template's own dropdowns accept, and the output must still match its fingerprint |
+| 41 | 28.7s | `test_template_preservation.py` | The central promise: a generated portal file differs from its master only in the member rows deliberately written |
+| 30 | 10.4s | `test_pipeline.py` | End-to-end case processing against a real database and the real workbooks, including reference allocation and the query cost of reprocessing |
 | 29 | <0.1s | `test_ocr.py` | Deterministic field extraction, document classification, and locating a Tesseract bundled inside the project |
-| 17 | 5.0s | `test_master_and_admin.py` | Client master, administration and the login mechanism |
-| 15 | 6.1s | `test_infrastructure.py` | Virus scanning, Excel recalculation, the purge scheduler and Alembic migrations |
+| 28 | 78.7s | `test_logbook_and_package.py` | The operational log workflow — statuses, date-range export, post-submission events — and supporting-document ZIP packaging with its manifest |
+| 27 | <0.1s | `test_matching_and_rules.py` | Member grouping, principal/dependant linkage and every validation rule |
+| 17 | 5.7s | `test_infrastructure.py` | Virus scanning, Excel recalculation, the purge scheduler and Alembic migrations |
+| 17 | 3.0s | `test_master_and_admin.py` | Client master, administration and the login mechanism |
 | 14 | <0.1s | `test_intake.py` | Pasted-instruction parsing and archive expansion |
-| 25 | 12.4s | `test_web.py` | The web tier through the real ASGI app — routing, templates, session cookie, paging, page weight and every export-refusal branch |
-| **282** | **152.0s** | | |
+| **297** | **187.0s** | | |
 
 `test_logbook_and_package.py` and `test_template_preservation.py` account for
 four-fifths of the runtime because they open, populate and re-fingerprint real
