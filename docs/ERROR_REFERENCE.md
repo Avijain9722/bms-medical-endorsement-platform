@@ -28,6 +28,7 @@ happen before anything leaves the platform.
 | **303** | Normal redirect after a successful action, and the redirect to `/login` when not signed in | Nobody — expected |
 | **400** | The request was understood but cannot be acted on. See §3 | The person making the request |
 | **403** | `Administrator access is required.` — a processor opened an admin screen | An administrator, if the person should have that access |
+| **403** | *This form was not submitted from a current session* — the CSRF token was missing, stale or from another session. Almost always a page left open past a sign-out, or a resubmitted back-button form. Sign in again and retry. If it happens unprompted, tell an administrator | Sign in again |
 | **404** | Case, member, file, export, log entry, user or client not found. Usually a stale link or an id typed by hand | Nobody — navigate again |
 | **410** | `This export has been purged under retention.` The record survives; the file is gone. Re-export if the case is still open | Re-export, or accept it |
 | **500** | Something unanticipated. See §5 | An administrator, from the server log |

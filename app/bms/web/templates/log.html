@@ -26,6 +26,7 @@ The six post-submission columns stay blank until the corresponding event is reco
   </form>
 
   <form method="post" action="/log/export" style="margin-top:.75rem">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     {% for key, value in filters.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
     <button type="submit" class="secondary">Download New Log Format -2026 for this filter</button>
     <span class="muted">{{ paging.total }} row(s) &middot; {{ criteria.describe() }}</span>

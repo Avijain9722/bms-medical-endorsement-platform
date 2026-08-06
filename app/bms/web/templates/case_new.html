@@ -3,6 +3,7 @@
 {% block content %}
 <h1>New case</h1>
 <form method="post" action="/cases" class="card grid two">
+  <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
   <div style="grid-column:1/-1">
     <label for="client_id">Company &mdash; from the client master</label>
     <select id="client_id" name="client_id" onchange="bmsClientChanged()">

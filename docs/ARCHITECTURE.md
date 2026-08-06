@@ -302,6 +302,7 @@ that crosses the limit, bounding peak memory by the limit itself.
 | Sessions | HMAC-signed cookie, `HttpOnly`, `SameSite=Lax`. Carries no privileges — the user is re-loaded per request, so disabling an account takes effect immediately |
 | Uploads | Virus-scanned before extraction. Infected files never reach storage. An absent scanner reports `unavailable`, never `clean` |
 | Archives | Zip-slip and zip-bomb guarded, with configurable member and size limits |
+| CSRF | Every state-changing request carries a token derived from the session — `HMAC(secret, session-cookie)`. No second cookie and no server-side store: it is stable per session, unique per session, unguessable without the signing key, and worthless once the session ends. Enforced as a global dependency, so a route added later is protected by default. Only `/login` is exempt, because no session exists yet to derive one from |
 | Authorisation | One operational role. Administrators additionally manage accounts and the client master. No role can override a critical error |
 | Retention | Documents purged 36 hours after closure; records and audit trail kept indefinitely |
 | Audit | Append-only, no edit or delete path, never purged |

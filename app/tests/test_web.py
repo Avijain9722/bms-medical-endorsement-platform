@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from conftest import BrowserClient  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -68,7 +69,7 @@ def client(tmp_path, monkeypatch):
             )
         )
     # follow_redirects=False so 303s are asserted rather than silently followed.
-    return TestClient(web_app.app, follow_redirects=False)
+    return BrowserClient(web_app.app, follow_redirects=False)
 
 
 def sign_in(client: TestClient) -> None:
@@ -531,7 +532,7 @@ def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkey
         raise RuntimeError("database connection lost mid-query")
 
     monkeypatch.setattr("bms.web.app.logbook.count", explode)
-    unhandled = TestClient(web_app.app, raise_server_exceptions=False)
+    unhandled = BrowserClient(web_app.app, raise_server_exceptions=False)
     unhandled.cookies = client.cookies
     response = unhandled.get("/log")
 
@@ -668,3 +669,85 @@ def test_reading_stops_at_the_limit_rather_than_buffering_everything():
     assert result is None
     # Bounded to roughly the limit plus the one chunk that crossed it.
     assert body.served <= 3 * 1024 * 1024
+
+
+# ------------------------------------------------------------------ CSRF
+#
+# SameSite=Lax already blocks the classic cross-site form POST. These cover the
+# rest: a same-site attack, a browser that does not honour SameSite, and any
+# future deployment reachable from outside the BMS network.
+
+
+def test_a_state_changing_post_without_a_token_is_rejected(client):
+    sign_in(client)
+    refused = client.post(
+        "/cases",
+        data={"client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition"},
+        csrf=False,
+    )
+    assert refused.status_code == 403
+    assert "not submitted from a current session" in refused.text
+
+    with db.session_scope() as session:
+        assert session.scalars(select(Case)).all() == [], "nothing may be created"
+
+
+def test_a_token_from_another_session_is_rejected(client):
+    """The token is derived from the session, so one user's cannot act for another."""
+    from bms.web.security import CSRF_FIELD, csrf_token
+
+    sign_in(client)
+    foreign = csrf_token("a-different-sessions-cookie-value")
+    refused = client.post(
+        "/cases",
+        data={
+            "client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition",
+            CSRF_FIELD: foreign,
+        },
+        csrf=False,
+    )
+    assert refused.status_code == 403
+
+
+def test_signing_out_is_protected_too(client):
+    """Otherwise an attacker can sign a user out at will -- minor, but free to stop."""
+    sign_in(client)
+    assert client.post("/logout", csrf=False).status_code == 403
+    assert client.post("/logout").status_code == 303
+
+
+def test_login_is_exempt_because_it_has_no_session_yet(client):
+    """The only exemption, and it must keep working."""
+    assert client.post(
+        "/login", data={"username": "tester", "password": "secret"}
+    ).status_code == 303
+
+
+def test_every_rendered_form_carries_a_token(client):
+    """A form added later without one would fail at 403 in front of a user.
+
+    Checked against the templates rather than a rendered page, so forms on
+    screens this test never visits are covered too.
+    """
+    import re
+    from pathlib import Path
+
+    templates = Path(__file__).resolve().parents[1] / "bms" / "web" / "templates"
+    for path in sorted(templates.glob("*.html")):
+        if path.name == "login.html":
+            continue  # exempt: no session exists yet
+        body = path.read_text()
+        forms = body.count('method="post"')
+        tokens = len(re.findall(r'name="\{\{ csrf_field \}\}"', body))
+        assert forms == tokens, f"{path.name}: {forms} POST form(s), {tokens} token(s)"
+
+
+def test_the_token_is_not_guessable_from_the_session_id(client):
+    """It is an HMAC under the signing key, not a transform of the cookie."""
+    from bms.web.security import csrf_token
+
+    cookie = "some-session-value"
+    token = csrf_token(cookie)
+    assert cookie not in token
+    assert len(token) == 64
+    assert csrf_token(cookie + "x") != token

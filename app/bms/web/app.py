@@ -48,7 +48,10 @@ from ..outputs.nas import SUPPORTED_KEYS
 from ..storage import ExportStorage
 from .security import (
     COOKIE_NAME,
+    CSRF_FIELD,
     SESSION_MAX_AGE_SECONDS,
+    csrf_token,
+    csrf_valid,
     hash_password,
     issue_session,
     locked_out,
@@ -77,11 +80,48 @@ async def lifespan(_: FastAPI):
             purge_task.cancel()
 
 
+# Only /login is exempt, and only because no session exists yet to derive a token
+# from. Everything else that changes state -- including /logout, so an attacker
+# cannot sign someone out -- is checked.
+CSRF_EXEMPT_PATHS = frozenset({"/login"})
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CSRF_REJECTED = (
+    "This form was not submitted from a current session, so nothing was changed. "
+    "If you were signed out, sign in again and retry. If you were not, tell your "
+    "administrator: something else tried to act as you."
+)
+
+
+async def _csrf_guard(request: Request) -> None:
+    """Reject a state-changing request that does not carry this session's token.
+
+    A dependency rather than middleware, deliberately. Middleware would have to
+    call `request.form()` to read the token, and that consumes the request body
+    before the route handler can parse it -- every form POST would fail with a
+    422. FastAPI resolves dependencies against the *same* Request the handler
+    uses, and Request.form() caches, so reading it here is free.
+
+    Registered globally on the application, so a route added later is protected
+    by default rather than by remembering to opt in.
+    """
+    if request.method not in UNSAFE_METHODS or request.url.path in CSRF_EXEMPT_PATHS:
+        return
+    form = await request.form()
+    submitted = form.get(CSRF_FIELD)
+    if not csrf_valid(
+        request.cookies.get(COOKIE_NAME), submitted if isinstance(submitted, str) else None
+    ):
+        logger.warning("CSRF check failed on %s %s", request.method, request.url.path)
+        raise HTTPException(status_code=403, detail=CSRF_REJECTED)
+
+
 app = FastAPI(
     title="BMS Medical Endorsement Platform",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
+    # Applied to every route, so a new one is protected by default.
+    dependencies=[Depends(_csrf_guard)],
 )
 
 
@@ -238,6 +278,9 @@ def _explain_refusal(error: Exception) -> str:
 
 
 def render(request: Request, name: str, **context) -> HTMLResponse:
+    # Supplied to every template so no page has to remember to ask for it.
+    context.setdefault("csrf_field", CSRF_FIELD)
+    context.setdefault("csrf_token", csrf_token(request.cookies.get(COOKIE_NAME)))
     return templates.TemplateResponse(request, name, context)
 
 

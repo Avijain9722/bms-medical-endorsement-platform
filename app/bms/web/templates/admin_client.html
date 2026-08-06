@@ -16,6 +16,7 @@
   </table>
   {% else %}<p class="muted">None yet.</p>{% endif %}
   <form method="post" action="/admin/clients/{{ client.id }}/sub-groups" class="grid three" style="margin-top:.75rem">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <div><label for="sg_name">Sub-group name *</label><input type="text" id="sg_name" name="name" required></div>
     <div><label for="sg_emirate">Emirate</label>
       <select id="sg_emirate" name="emirate">
@@ -37,6 +38,7 @@
   </table>
   {% else %}<p class="muted">None yet.</p>{% endif %}
   <form method="post" action="/admin/clients/{{ client.id }}/entities" class="grid two" style="margin-top:.75rem">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <div><label for="e_name">Entity name *</label><input type="text" id="e_name" name="name" required></div>
     <div><label for="e_contract">Contract literal</label><input type="text" id="e_contract" name="contract_name" placeholder="exactly as the insurer template expects"></div>
     <div style="align-self:end"><button type="submit">Add entity</button></div>
@@ -59,6 +61,7 @@
   </table>
   {% else %}<p class="muted">None yet.</p>{% endif %}
   <form method="post" action="/admin/clients/{{ client.id }}/policies" class="grid three" style="margin-top:.75rem">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <div><label for="p_insurer">Insurer / TPA *</label><input type="text" id="p_insurer" name="insurer" required></div>
     <div><label for="p_network">Network</label><input type="text" id="p_network" name="network"></div>
     <div><label for="p_policy">Policy no.</label><input type="text" id="p_policy" name="policy_no"></div>

@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+from conftest import BrowserClient  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -121,7 +122,7 @@ def client(env):
                 is_admin=False,
             )
         )
-    return TestClient(web_app.app, follow_redirects=False)
+    return BrowserClient(web_app.app, follow_redirects=False)
 
 
 def sign_in(http: TestClient, username: str, password: str) -> None:

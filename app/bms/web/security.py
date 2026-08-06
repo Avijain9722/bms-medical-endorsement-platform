@@ -154,3 +154,32 @@ def reset_throttle() -> None:
     """Test helper: forget all recorded failures."""
     _failures.clear()
     _locked_until.clear()
+
+
+# ---------------------------------------------------------------------- CSRF
+
+# The token is derived from the session cookie rather than stored anywhere: it is
+# HMAC(secret, session-value), so it is stable for the life of a session, unique
+# per session, and unguessable without the signing key. That means no extra
+# cookie, no server-side table to expire, and nothing to keep in sync -- and a
+# stolen token is useless once its session ends.
+#
+# SameSite=Lax already blocks the classic cross-site form POST, so this is
+# defence in depth: it also covers same-site attacks, a browser that does not
+# honour SameSite, and any future deployment where the platform is reachable from
+# outside the BMS network.
+CSRF_FIELD = "_csrf"
+
+
+def csrf_token(session_cookie: str | None) -> str:
+    """The token belonging to this session. Empty when there is no session."""
+    if not session_cookie:
+        return ""
+    return hmac.new(_secret(), b"csrf:" + session_cookie.encode(), hashlib.sha256).hexdigest()
+
+
+def csrf_valid(session_cookie: str | None, submitted: str | None) -> bool:
+    expected = csrf_token(session_cookie)
+    if not expected or not submitted:
+        return False
+    return hmac.compare_digest(expected, submitted)

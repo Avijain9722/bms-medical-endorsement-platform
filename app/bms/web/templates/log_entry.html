@@ -44,6 +44,7 @@
   <h2>Actions</h2>
   <div class="grid three">
     <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
       <input type="hidden" name="event" value="submitted_to_insurer">
       <label>Record submission to insurer</label>
       <input type="text" name="request_ref_no" placeholder="Request Ref. No.">
@@ -51,6 +52,7 @@
       <button class="secondary">Record submission</button>
     </form>
     <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
       <input type="hidden" name="event" value="card_received">
       <label>Record card issued / sent</label>
       <input type="text" name="card_no" placeholder="CARD #">
@@ -58,6 +60,7 @@
       <button class="secondary">Record card</button>
     </form>
     <form method="post" action="/log/{{ entry.id }}/fields" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
       <label>Status and remarks</label>
       <select name="status">
         {% for s in statuses %}<option value="{{ s }}" {% if entry.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
@@ -67,12 +70,14 @@
       <button class="secondary">Save</button>
     </form>
     <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
       <input type="hidden" name="event" value="voucher_recorded">
       <label>Saiba voucher</label>
       <input type="text" name="saiba_voucher_no" placeholder="Saiba Voucher No.">
       <button class="secondary">Record voucher</button>
     </form>
     <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
       <input type="hidden" name="event" value="invoice_dated">
       <label>BBM invoice date</label>
       <input type="text" name="bbm_invoice_date" placeholder="dd/mm/yyyy">

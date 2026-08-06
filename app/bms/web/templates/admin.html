@@ -19,6 +19,7 @@ processing privilege, and no role can override a critical error.</p>
       <td>{% if u.is_admin %}yes{% else %}<span class="muted">no</span>{% endif %}</td>
       <td>
         <form method="post" action="/admin/users/{{ u.id }}/password" class="inline">
+          <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
           <input type="password" name="password" placeholder="new password" style="width:12rem" required minlength="10">
           <button class="secondary">Reset</button>
         </form>
@@ -29,6 +30,7 @@ processing privilege, and no role can override a critical error.</p>
 
   <h3 style="margin-top:1.25rem">Add a user</h3>
   <form method="post" action="/admin/users" class="grid three">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <div><label for="username">Username *</label><input type="text" id="username" name="username" required></div>
     <div><label for="display_name">Display name</label><input type="text" id="display_name" name="display_name"></div>
     <div><label for="log_associate">Log associate (SHARED BY)</label><input type="text" id="log_associate" name="log_associate" placeholder="e.g. JAHNVI"></div>
@@ -64,6 +66,7 @@ processing privilege, and no role can override a critical error.</p>
 
   <h3 style="margin-top:1.25rem">Add a company</h3>
   <form method="post" action="/admin/clients" class="grid three">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <div><label for="name">Company name *</label><input type="text" id="name" name="name" required></div>
     <div><label for="code">Client code</label><input type="text" id="code" name="code"></div>
     <div style="align-self:end"><button type="submit">Add company</button></div>
@@ -71,6 +74,7 @@ processing privilege, and no role can override a critical error.</p>
 
   <h3 style="margin-top:1.25rem">Import from Excel</h3>
   <form method="post" action="/admin/clients/import" enctype="multipart/form-data">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <input type="file" name="workbook" accept=".xlsx" required>
     <button class="secondary">Import</button>
   </form>

@@ -24,6 +24,7 @@
 {% endfor %}
 
 <form method="post" action="/cases/{{ case.id }}/members/{{ member.id }}">
+  <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
   <div class="card">
     <h2>Identity</h2>
     <div class="grid three">
@@ -68,6 +69,7 @@
 </form>
 
 <form method="post" action="/cases/{{ case.id }}/members/{{ member.id }}/approve">
+  <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
   <button type="submit" class="secondary">Approve this member</button>
   <span class="muted">Approval is refused while a critical issue is open.</span>
 </form>
