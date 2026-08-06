@@ -309,7 +309,11 @@ class ExtractedField(Base):
     __tablename__ = "extracted_fields"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    file_id: Mapped[str] = mapped_column(String(36), ForeignKey("case_files.id"), nullable=False)
+    # The one foreign key the indexing pass missed, and the most read of them
+    # all: every document's fields are looked up by it on every reprocess.
+    file_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("case_files.id"), nullable=False, index=True
+    )
 
     field_key: Mapped[str] = mapped_column(String(64), nullable=False)
     raw_value: Mapped[str | None] = mapped_column(String(512))

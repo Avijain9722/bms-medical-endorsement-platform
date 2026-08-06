@@ -321,6 +321,49 @@ def test_full_addition_export_produces_both_workbooks(session, user, env):
     assert leftovers == [], f"scratch files left behind: {leftovers}"
 
 
+def test_reprocessing_does_not_query_once_per_document(session, user, env):
+    """It used to issue four round trips per file, and nothing capped the count.
+
+    The files were selected twice and their fields once per file, twice over,
+    because identity building and member building each loaded their own copy. A
+    120-document batch -- one large client email -- took 267 queries to assemble
+    what two statements return. The count must not scale with the batch.
+    """
+    from sqlalchemy import event
+
+    visa = "RESIDENCE VISA\nStaff ID: {sid}\nU.I.D No: 5862089{i}\n"
+
+    def queries_for(document_count: int) -> int:
+        case = make_case(session, user, env, instruction="Kindly add the below.")
+        for index in range(document_count):
+            pipeline.add_upload(
+                session, case, f"Visa{index}.txt",
+                visa.format(sid=80000 + index, i=index % 10).encode(), actor=user.username,
+            )
+        pipeline.analyse_files(
+            session, case, actor=user.username, pipeline=text_only_pipeline()
+        )
+        session.flush()
+
+        counted = 0
+
+        def count(*args, **kwargs):
+            nonlocal counted
+            counted += 1
+
+        engine = db.get_engine()
+        event.listen(engine, "before_cursor_execute", count)
+        try:
+            pipeline.build_members(session, case, actor=user.username)
+        finally:
+            event.remove(engine, "before_cursor_execute", count)
+        return counted
+
+    few = queries_for(4)
+    many = queries_for(40)
+    assert few == many, f"{few} queries for 4 documents, {many} for 40 -- it scales with the batch"
+
+
 def test_a_reference_is_not_reissued_after_a_case_is_deleted(session, user, env):
     """`Case.reference` is unique, so a repeated one is a 500 in front of a user.
 
