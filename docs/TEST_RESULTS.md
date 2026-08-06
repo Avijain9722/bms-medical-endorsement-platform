@@ -3,7 +3,7 @@
 The recorded run of the automated suite for the delivered build.
 
 ```
-297 tests · 0 failures · 0 errors · 0 skipped · 187.0s
+300 tests · 0 failures · 0 errors · 0 skipped · 187.0s
 ```
 
 Reproduce it with:
@@ -29,7 +29,7 @@ python3 -m pytest tests -q
 | Tesseract | 5.3.4, bundled at `vendor/tesseract/` — see §4 |
 | ClamAV | **not installed** — deliberate, see §4 |
 | Microsoft Excel | **not available** — Linux host, see §4 |
-| Result | **297 passed, 0 failed, 0 errored, 0 skipped** |
+| Result | **300 passed, 0 failed, 0 errored, 0 skipped** |
 
 Zero skips is the number to look at. Nothing was quietly stepped over because
 the host lacked something; where a capability is missing, the test asserts the

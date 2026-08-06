@@ -1,7 +1,7 @@
 name: Tests
 
 # Runs automatically on every push and pull request, and can also be started by
-# hand from the Actions tab. Three independent gates:
+# hand from the Actions tab. Four independent gates:
 #
 #   1. source-integrity -- the supplied insurer workbooks, the BMS log template
 #      and the brand assets must be byte-identical to the manifest BMS shipped.
@@ -14,6 +14,12 @@ name: Tests
 #   3. windows-install -- the installer, launcher and verifier a BMS
 #      administrator actually runs, executed as they would run them. A green
 #      test suite says nothing about whether install.ps1 works.
+#   4. offline-bundle + offline-install -- the release path itself: a wheelhouse
+#      built on Linux for a Windows target, then installed on Windows with the
+#      network refused. This exists because a bundle shipped to BMS was missing
+#      colorama and stopped the installation dead. Nothing above catches that:
+#      windows-install downloads from PyPI, and checking the bundle on the Linux
+#      machine that built it passes for the same wrong reason the build failed.
 
 on:
   push:
@@ -160,3 +166,108 @@ jobs:
             '**FAILED** — the Windows path is broken; see the step log above.'
           }
           "## Windows install`n`n$result" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+  offline-bundle:
+    name: Offline bundle (built on Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Deliberately NOT the target version. The bundle is cross-built, which
+          # is exactly the situation that hid the missing package: pip evaluates
+          # environment markers against this machine, not against win_amd64.
+          python-version: "3.12"
+
+      - name: Build the wheelhouse the same way a release is built
+        run: ./deploy/build-wheelhouse.sh 3.14 deploy/wheelhouse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheelhouse-py314-win_amd64
+          path: deploy/wheelhouse
+          retention-days: 7
+
+  offline-install:
+    name: Offline install on Windows, network refused
+    needs: offline-bundle
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheelhouse-py314-win_amd64
+          path: deploy/wheelhouse
+
+      - name: Confirm the bundle is actually present
+        shell: pwsh
+        run: |
+          $wheels = Get-ChildItem deploy\wheelhouse -Filter *.whl
+          Write-Host "$($wheels.Count) wheels in the bundle"
+          if ($wheels.Count -lt 30) { throw 'the wheelhouse did not arrive intact' }
+
+      # install.ps1 and verify.ps1 both pass --no-index when a wheelhouse is
+      # present, so pip cannot reach PyPI. An incomplete bundle fails here with
+      # the same error a BMS administrator would see, which is the whole point.
+      - name: Install offline, exactly as the BMS host does
+        shell: pwsh
+        run: |
+          # install.ps1 reports progress with Write-Host, which writes to the
+          # INFORMATION stream (6) -- not the success stream. `2>&1` redirects
+          # only errors, so capturing that way collects nothing and the check
+          # below fails even when the install succeeded. `6>&1` is the one that
+          # matters. Tee to a file rather than a variable so the output survives
+          # for inspection even if install.ps1 throws part way through.
+          .\deploy\install.ps1 6>&1 | Tee-Object -FilePath install-offline.log
+          $log = Get-Content install-offline.log -Raw
+          if ($log -notmatch 'offline bundle found') {
+            throw ('install.ps1 did not report using the offline bundle, so this ' +
+                   'job proved nothing about the offline path')
+          }
+          if ($log -match 'downloading from PyPI') {
+            throw 'install.ps1 fell back to PyPI -- the bundle was not used'
+          }
+          Write-Host 'confirmed: installed from the bundle, with pip refusing the network'
+
+      - name: Verify offline, and run the suite from the bundle
+        shell: pwsh
+        run: .\deploy\verify.ps1
+
+      - name: Start the platform and check it serves
+        shell: pwsh
+        run: |
+          $server = Start-Process -PassThru -NoNewWindow `
+            -FilePath "app\.venv\Scripts\python.exe" `
+            -ArgumentList "-m","uvicorn","bms.web.app:app","--host","127.0.0.1","--port","8000" `
+            -WorkingDirectory "app"
+          try {
+            $ok = $false
+            foreach ($attempt in 1..30) {
+              Start-Sleep -Seconds 2
+              try {
+                $health = Invoke-RestMethod http://127.0.0.1:8000/health -TimeoutSec 5
+                if ($health.status -eq 'ok') { $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) { throw 'the platform did not answer /health within 60s' }
+            Write-Host "installed entirely from the offline bundle and serving"
+          } finally {
+            if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+          }
+
+      - name: Summarise
+        if: always()
+        shell: pwsh
+        run: |
+          $result = if ('${{ job.status }}' -eq 'success') {
+            '**PASSED** - a Linux-built bundle installs on Windows with no network.'
+          } else {
+            '**FAILED** - the offline release path is broken; a BMS install would fail.'
+          }
+          "## Offline install`n`n$result" | Out-File -Append $env:GITHUB_STEP_SUMMARY
