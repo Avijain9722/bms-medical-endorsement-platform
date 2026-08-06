@@ -706,6 +706,44 @@ def test_every_response_carries_the_browser_defences(client):
         assert "object-src 'none'" in policy
 
 
+def test_the_policy_refuses_inline_script(client):
+    """With 'unsafe-inline' on script-src, any markup that reaches a page runs.
+
+    That is what turned an unescaped error message into a live script injection
+    rather than a display bug. Nothing needs the relaxation: the platform's only
+    script is served from /static.
+    """
+    policy = client.get("/login").headers["Content-Security-Policy"]
+    script_src = next(d for d in policy.split(";") if d.strip().startswith("script-src"))
+    assert "unsafe-inline" not in script_src, script_src
+
+
+def test_no_page_carries_inline_script_the_policy_would_block(client):
+    """A page written with an inline <script> or an on* handler is now dead code
+    in the browser, and would fail silently rather than loudly."""
+    templates = Path(__file__).resolve().parents[1] / "bms" / "web" / "templates"
+    for path in sorted(templates.glob("*.html")):
+        body = path.read_text()
+        assert "<script>" not in body, f"{path.name}: inline script the CSP blocks"
+        assert not re.search(r"\son[a-z]+=", body), f"{path.name}: inline event handler"
+
+
+def test_the_stylesheet_and_script_are_served_and_revalidate(client):
+    """Served as files rather than re-sent inside every page.
+
+    The stylesheet was 3.3 KB of identical bytes on all eleven screens; as a file
+    the browser fetches it once and revalidates with a 304 after that.
+    """
+    for asset, kind in (("/static/bms.css", "css"), ("/static/case_new.js", "javascript")):
+        first = client.get(asset)
+        assert first.status_code == 200
+        assert kind in first.headers["content-type"]
+        assert first.headers.get("etag"), "no etag, so the browser cannot revalidate"
+
+        again = client.get(asset, headers={"If-None-Match": first.headers["etag"]})
+        assert again.status_code == 304, "a repeat visit re-downloads the whole file"
+
+
 def test_hsts_is_only_sent_when_the_cookie_is_secure(client):
     """Promising HTTPS-only over a plain-HTTP deployment would lock users out."""
     assert "Strict-Transport-Security" not in client.get("/login").headers

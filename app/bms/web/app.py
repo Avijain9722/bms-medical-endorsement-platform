@@ -16,6 +16,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -67,6 +68,7 @@ logger = logging.getLogger("bms.web")
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+STATIC_DIR = BASE_DIR / "static"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -127,6 +129,12 @@ app = FastAPI(
 )
 
 
+# The stylesheet and the one script. Served as files so they are fetched once
+# and revalidated with a 304, rather than re-sent inside every page, and so the
+# CSP above can refuse inline script outright.
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     """Browser-side defences, on every response.
@@ -143,7 +151,13 @@ async def _security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        # script-src carries no 'unsafe-inline'. With it, any markup that reached
+        # a page could execute -- which is what made the escaping defect in the
+        # error handler a live script injection rather than a display bug. The
+        # platform's only script is served from /static, so nothing needs it.
+        # style-src keeps it: the templates use style attributes for layout, and
+        # a style attribute cannot run script.
+        "default-src 'self'; script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; "
         "base-uri 'none'; object-src 'none'",
