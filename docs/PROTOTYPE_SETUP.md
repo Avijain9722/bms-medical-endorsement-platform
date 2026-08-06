@@ -57,8 +57,18 @@ Nothing here contacts an external service at runtime.
 
 ```bash
 cd app
-uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+# Windows: .venv\Scripts\python.exe -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
 ```
+
+`.venv/bin/python -m uvicorn` rather than a bare `uvicorn`: the explicit path
+works whether or not the virtual environment is activated in this particular
+terminal. A bare `uvicorn` in a fresh terminal fails with
+`No module named uvicorn`, because it runs the system Python instead.
+
+Simpler still, the launchers do the whole thing -- installing first if
+needed: `deploy/start-linux.sh`, or double-click `deploy\START-WINDOWS.bat`.
+
 
 Open `http://127.0.0.1:8000`. On first start the application creates a user
 `bms` and prints its password once:

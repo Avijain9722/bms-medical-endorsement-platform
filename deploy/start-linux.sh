@@ -30,6 +30,17 @@ if [ ! -x "$APP/.venv/bin/python" ]; then
     echo
 fi
 
+# Confirm the dependencies really landed in the virtual environment. Running the
+# wrong Python is the usual cause of "No module named uvicorn", and the error on
+# its own does not say which Python was used.
+if ! "$APP/.venv/bin/python" -c "import uvicorn" >/dev/null 2>&1; then
+    echo " The virtual environment is missing its dependencies."
+    echo
+    echo " Re-run the installer:   $HERE/install.sh"
+    echo " If that fails, delete app/.venv and run it again."
+    exit 1
+fi
+
 PORT="${BMS_PORT:-8000}"
 echo " Starting on http://127.0.0.1:$PORT"
 echo

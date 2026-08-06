@@ -46,6 +46,24 @@ if not exist "app\.venv\Scripts\python.exe" (
     echo.
 )
 
+REM Confirm the dependencies really landed in the virtual environment. Running
+REM the wrong Python is the usual cause of "No module named uvicorn", and the
+REM error on its own does not say which Python was used.
+app\.venv\Scripts\python.exe -c "import uvicorn" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo  The virtual environment is missing its dependencies.
+    echo.
+    echo  Re-run setup:
+    echo    powershell -ExecutionPolicy Bypass -File "deploy\install.ps1"
+    echo.
+    echo  If that fails, delete the app\.venv folder and double-click
+    echo  this file again to reinstall from scratch.
+    echo.
+    pause
+    exit /b 1
+)
+
 echo  Starting... your browser will open at http://127.0.0.1:8000
 echo.
 echo  Leave this window open while you work.

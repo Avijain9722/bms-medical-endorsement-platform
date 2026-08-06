@@ -97,5 +97,6 @@ PY
 
 echo
 echo "Install complete."
-echo "  Start:  cd app && source .venv/bin/activate && uvicorn bms.web.app:app --host 127.0.0.1 --port 8000"
+echo "  Start:  ./deploy/start-linux.sh"
+echo "  Or:     cd app && .venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000"
 echo "  Or:     sudo cp deploy/bms-endorsements.service /etc/systemd/system/ && sudo systemctl enable --now bms-endorsements"

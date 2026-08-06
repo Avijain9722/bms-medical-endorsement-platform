@@ -26,8 +26,16 @@ cd app
 python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python3 -m alembic upgrade head
-uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
 ```
+
+On Windows the last line is `.venv\Scripts\python.exe -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000`.
+
+`.venv/bin/python -m uvicorn` rather than a bare `uvicorn`: the explicit path
+works whether or not the virtual environment is activated in this particular
+terminal. A bare `uvicorn` in a fresh terminal fails with
+`No module named uvicorn`, because it runs the system Python instead.
+
 
 The first start prints a seed account's password once. Capture it, sign in,
 create real accounts. Set `BMS_SECRET_KEY` before that first start or everyone is

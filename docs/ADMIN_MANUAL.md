@@ -32,8 +32,16 @@ cd app
 python3 -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python3 -m alembic upgrade head
-uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
 ```
+
+On Windows the last line is `.venv\Scripts\python.exe -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000`.
+
+`.venv/bin/python -m uvicorn` rather than a bare `uvicorn`: the explicit path
+works whether or not the virtual environment is activated in this particular
+terminal. A bare `uvicorn` in a fresh terminal fails with
+`No module named uvicorn`, because it runs the system Python instead.
+
 
 Before that first start, set at minimum:
 
@@ -376,6 +384,30 @@ once no open case refers to them.
 ---
 
 ## 10. Troubleshooting
+
+**`ModuleNotFoundError: No module named uvicorn`** (or `alembic`, or `fastapi`).
+
+You are running the system Python instead of the platform's own. The virtual
+environment holds the dependencies, and a bare `uvicorn` only finds them if that
+environment is activated in the terminal you are typing into — which it is not in
+a freshly opened one.
+
+Use the launcher, which never has this problem:
+
+```bash
+./deploy/start-linux.sh                                          # Linux
+powershell -ExecutionPolicy Bypass -File deploy\START-WINDOWS.bat  # Windows
+```
+
+Or address the environment's Python explicitly:
+
+```bash
+cd app && .venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+```
+
+If that still fails, the environment really is incomplete — re-run
+`deploy/install.sh` (or `install.ps1`). Deleting `app/.venv` first forces a
+clean rebuild.
 
 **Everyone is logged out after every restart.**
 `BMS_SECRET_KEY` is not set, so a new signing key is generated at each start. Set
