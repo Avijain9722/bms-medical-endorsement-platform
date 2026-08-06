@@ -1,14 +1,19 @@
 name: Tests
 
 # Runs automatically on every push and pull request, and can also be started by
-# hand from the Actions tab. Two independent gates:
+# hand from the Actions tab. Three independent gates:
 #
 #   1. source-integrity -- the supplied insurer workbooks, the BMS log template
 #      and the brand assets must be byte-identical to the manifest BMS shipped.
 #      If one drifts, every fingerprint in the registry is silently invalidated,
 #      so this runs first and fails the build.
-#   2. tests -- the 41-test template-preservation suite, which proves a generated
-#      workbook differs from its master only in the cells we deliberately wrote.
+#   2. tests -- the full suite, on Linux AND Windows. Windows is not optional
+#      cover: it is the platform BMS actually deploys on, it is the only one
+#      where Excel can evaluate the log and Daman formulas, and its path
+#      handling, file locking and line endings differ from the development host.
+#   3. windows-install -- the installer, launcher and verifier a BMS
+#      administrator actually runs, executed as they would run them. A green
+#      test suite says nothing about whether install.ps1 works.
 
 on:
   push:
@@ -35,14 +40,24 @@ jobs:
         working-directory: app
 
   tests:
-    name: Template preservation suite
-    runs-on: ubuntu-latest
+    name: Suite (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One red platform should not hide the other's result.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          # The deployment target. 3.12 is what the offline Windows package pins.
+          - os: windows-latest
+            python: "3.12"
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
 
       # The preservation core is standard library only, by design: general
       # purpose spreadsheet libraries rewrite parts they do not understand. The
@@ -50,30 +65,94 @@ jobs:
       # and httpx. Local OCR engines are deliberately NOT installed here -- the
       # suite proves the pipeline degrades honestly without them.
       - name: Install dependencies
-        run: python3 -m pip install --quiet -r requirements-dev.txt
+        run: python -m pip install --quiet -r requirements-dev.txt
         working-directory: app
 
-      - name: Run preservation suite
-        run: python3 -m pytest tests -q --junit-xml=../test-results.xml
+      - name: Run suite
+        run: python -m pytest tests -q --junit-xml=../test-results.xml
         working-directory: app
-
-      - name: Summarise result
-        if: always()
-        run: |
-          {
-            echo "## Template preservation suite"
-            echo
-            if [ "${{ job.status }}" = "success" ]; then
-              echo "**PASSED** — generated workbooks are structurally identical to their masters."
-            else
-              echo "**FAILED** — see the step log above for the structural deltas."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: test-results-${{ matrix.os }}
           path: test-results.xml
           if-no-files-found: warn
+
+  windows-install:
+    name: Windows install and verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # No wheelhouse is committed, so this exercises the online path: the
+      # installer falls back to PyPI and says so. The offline path is covered by
+      # building a bundle and re-running with it present.
+      - name: Run install.ps1 exactly as an administrator would
+        shell: pwsh
+        run: .\deploy\install.ps1
+
+      - name: Confirm it generated a signing key rather than shipping one
+        shell: pwsh
+        run: |
+          $env = Get-Content app\.env -Raw
+          if ($env -match '(?m)^BMS_SECRET_KEY=CHANGE_ME') {
+            throw 'install.ps1 left the placeholder signing key in place'
+          }
+          if ($env -match '(?m)^BMS_SEED_PASSWORD=CHANGE_ME') {
+            throw 'a default administrator password is being shipped'
+          }
+          Write-Host 'signing key generated, no default password'
+
+      - name: Run verify.ps1 exactly as an administrator would
+        shell: pwsh
+        run: .\deploy\verify.ps1
+
+      - name: Start the platform and check it serves
+        shell: pwsh
+        run: |
+          $server = Start-Process -PassThru -NoNewWindow `
+            -FilePath "app\.venv\Scripts\python.exe" `
+            -ArgumentList "-m","uvicorn","bms.web.app:app","--host","127.0.0.1","--port","8000" `
+            -WorkingDirectory "app"
+          try {
+            $ok = $false
+            foreach ($attempt in 1..30) {
+              Start-Sleep -Seconds 2
+              try {
+                $health = Invoke-RestMethod http://127.0.0.1:8000/health -TimeoutSec 5
+                if ($health.status -eq 'ok') { $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) { throw 'the platform did not answer /health within 60s' }
+
+            Write-Host "database   : $($health.database)"
+            Write-Host "ocr engines: $($health.ocr_engines -join ', ')"
+            Write-Host "templates  : $($health.templates.Count)"
+            if ($health.templates.Count -lt 8) { throw 'not all templates registered' }
+
+            $login = Invoke-WebRequest http://127.0.0.1:8000/login -UseBasicParsing
+            if ($login.StatusCode -ne 200) { throw 'the sign-in page did not load' }
+            if ($login.Headers['X-Frame-Options'] -ne 'DENY') {
+              throw 'security headers are missing on Windows'
+            }
+            Write-Host 'serves /health and /login, security headers present'
+          } finally {
+            if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+          }
+
+      - name: Summarise
+        if: always()
+        shell: pwsh
+        run: |
+          $result = if ('${{ job.status }}' -eq 'success') {
+            '**PASSED** — install.ps1, verify.ps1 and the platform all run on Windows.'
+          } else {
+            '**FAILED** — the Windows path is broken; see the step log above.'
+          }
+          "## Windows install`n`n$result" | Out-File -Append $env:GITHUB_STEP_SUMMARY
