@@ -11,6 +11,7 @@ import itertools
 import re
 import sys
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -521,6 +522,49 @@ def test_every_export_refusal_is_explained_not_a_500(client, monkeypatch, except
     assert response.status_code == 200, "a refusal is shown on the case screen, not a 500"
     assert expected in response.text
     assert "Traceback" not in response.text
+
+
+def test_a_refused_export_shows_the_case_screen_the_case_screen_shows(client, monkeypatch):
+    """The two routes that render case_detail.html had drifted apart.
+
+    Each assembled the page's context separately, and the refusal path had lost
+    the ordering: it listed exports oldest-first, so the file the operator had
+    just tried to produce dropped to the bottom of the list at exactly the moment
+    they were looking for it. Both now build the context in one place.
+    """
+    from bms.models import Export
+
+    case_id = _approved_case(client)
+    with db.session_scope() as session:
+        for index, name in enumerate(["first.xlsx", "second.xlsx", "third.xlsx"]):
+            session.add(
+                Export(
+                    case_id=case_id,
+                    kind="portal",
+                    filename=name,
+                    relative_path=f"x/{name}",
+                    sha256="0" * 64,
+                    created_at=datetime(2026, 1, 1 + index, tzinfo=timezone.utc),
+                )
+            )
+
+    def refuse(*args, **kwargs):
+        raise web_app.pipeline.ExportBlocked("nothing approved")
+
+    monkeypatch.setattr("bms.web.app.pipeline.export_case", refuse)
+    refused = client.post(
+        f"/cases/{case_id}/export", data={"template_key": "nas.addition.aldar.v1"}
+    )
+    shown = client.get(f"/cases/{case_id}")
+
+    names = ("first.xlsx", "second.xlsx", "third.xlsx")
+
+    def order(page: str) -> list[str]:
+        """The filenames in the order the page actually puts them in."""
+        assert all(name in page for name in names)
+        return sorted(names, key=page.index)
+
+    assert order(refused.text) == order(shown.text) == ["third.xlsx", "second.xlsx", "first.xlsx"]
 
 
 def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkeypatch):
