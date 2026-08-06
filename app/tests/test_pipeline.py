@@ -1,0 +1,454 @@
+"""End-to-end case processing against a real database and real templates."""
+
+from __future__ import annotations
+
+import io
+import sys
+import zipfile
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from sqlalchemy import select
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from bms import db, pipeline  # noqa: E402
+from bms.config import Settings  # noqa: E402
+from bms.models import (  # noqa: E402
+    Base,
+    Case,
+    CaseFile,
+    FileStatus,
+    LogEntry,
+    Member,
+    ReviewFlag,
+    Severity,
+    User,
+)
+from bms.ocr.text import PlainTextFile, TextPipeline  # noqa: E402
+from bms.outputs import log as log_output  # noqa: E402
+from bms.storage import ExportStorage  # noqa: E402
+from bms.web.security import hash_password  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+PASSPORT_TEXT = """PASSPORT
+P<INDKANNADHASAN<<RITHICK<<<<<<<<<<<<<<<<<<<
+P1234567<1IND9003071M3001019<<<<<<<<<<<<<<02
+"""
+
+VISA_TEXT = """RESIDENCE VISA
+Staff ID: 82270
+U.I.D No: 58620894
+Emirates ID 784-1998-0432182-8
+"""
+
+INSTRUCTION = """
+Dear Team,
+Kindly add the below employee to the policy.
+Basatin ID Name Marital Status CAT
+82270 Rithick Kannadhasan Single CAT C
+Regards,
+"""
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    """An isolated database and data root per test."""
+    config = Settings(
+        database_url=f"sqlite:///{tmp_path / 'test.db'}",
+        data_root=tmp_path / "var",
+        template_root=REPO_ROOT,
+    )
+    config.ensure_directories()
+    monkeypatch.setattr("bms.config.settings", config)
+    for module in ("bms.storage", "bms.pipeline", "bms.intake.archives", "bms.ocr.text"):
+        monkeypatch.setattr(f"{module}.settings", config, raising=False)
+
+    engine = db.init_engine(config)
+    Base.metadata.create_all(engine)
+    return config
+
+
+@pytest.fixture()
+def session(env):
+    with db.session_scope() as active:
+        yield active
+
+
+@pytest.fixture()
+def user(session):
+    record = User(
+        username="tester",
+        display_name="Test User",
+        log_associate="JAHNVI",
+        password_hash=hash_password("secret"),
+    )
+    session.add(record)
+    session.flush()
+    return record
+
+
+def text_only_pipeline() -> TextPipeline:
+    """No OCR binaries in CI, so drive the pipeline with the plain-text reader."""
+    return TextPipeline([PlainTextFile()])
+
+
+def make_case(session, user, config, *, transaction="addition", instruction=INSTRUCTION) -> Case:
+    return pipeline.create_case(
+        session,
+        client_name="BASATIN",
+        insurer="QATAR INSURANCE",
+        transaction_type=transaction,
+        actor=user.username,
+        bms_comments=instruction,
+        contract_name="BASATIN LANDSCAPING - SOLE PROPRIETOSHIP LLC_AUH",
+        category="CAT C",
+        sub_group="AUH",
+        owner_id=user.id,
+    )
+
+
+def zip_of(entries: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+    return buffer.getvalue()
+
+
+# --------------------------------------------------------------- persistence
+
+
+def test_case_reference_is_sequential(session, user, env):
+    first = make_case(session, user, env)
+    second = make_case(session, user, env)
+    assert first.reference.endswith("00001")
+    assert second.reference.endswith("00002")
+
+
+def test_uploads_are_written_to_disk_and_survive_a_new_session(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "visa.txt", VISA_TEXT.encode(), actor=user.username)
+    session.commit()
+
+    # A fresh session, as if the user came back tomorrow.
+    with db.session_scope() as later:
+        reloaded = later.get(Case, case.id)
+        files = list(later.scalars(select(CaseFile).where(CaseFile.case_id == reloaded.id)))
+        assert len(files) == 1
+        from bms.storage import Storage
+
+        assert Storage(env).get_bytes(files[0].sha256).decode() == VISA_TEXT
+
+
+def test_identical_uploads_are_deduplicated(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "a.txt", b"same bytes", actor=user.username)
+    outcome = pipeline.add_upload(session, case, "b.txt", b"same bytes", actor=user.username)
+    assert outcome.stored == []
+    assert outcome.duplicates == ["b.txt"]
+
+
+def test_zip_uploads_are_expanded(session, user, env):
+    case = make_case(session, user, env)
+    payload = zip_of({"Passport.txt": PASSPORT_TEXT.encode(), "Visa.txt": VISA_TEXT.encode()})
+    outcome = pipeline.add_upload(session, case, "82270.zip", payload, actor=user.username)
+    assert len(outcome.stored) == 2
+    assert all(record.archive_path.startswith("82270.zip/") for record in outcome.stored)
+
+
+# ---------------------------------------------------------------- processing
+
+
+def test_processing_reads_documents_and_builds_a_member(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Passport.txt", PASSPORT_TEXT.encode(), actor=user.username)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    members = pipeline.build_members(session, case, actor=user.username)
+
+    assert len(members) == 1
+    member = members[0]
+    assert member.passport_no == "P1234567"
+    assert member.emirates_id == "784-1998-0432182-8"
+    assert member.unified_no == "58620894"
+    assert member.staff_id == "82270"
+    # Every proposed value knows where it came from.
+    assert member.provenance["passport_no"]["source_name"] == "Passport.txt"
+    assert 0 < member.provenance["passport_no"]["confidence"] <= 1
+
+
+def test_effective_date_defaults_to_the_processing_date(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    members = pipeline.build_members(session, case, actor=user.username)
+    assert members[0].effective_date == date.today().isoformat()
+
+
+def test_unreadable_documents_are_flagged_not_silently_skipped(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "scan.jpg", b"\xff\xd8\xff\xe0not-readable", actor=user.username)
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    pipeline.build_members(session, case, actor=user.username)
+
+    record = session.scalars(select(CaseFile).where(CaseFile.case_id == case.id)).one()
+    assert record.status == FileStatus.OCR_UNAVAILABLE.value
+    flags = list(session.scalars(select(ReviewFlag).where(ReviewFlag.case_id == case.id)))
+    assert any(flag.code == "ocr_unavailable" for flag in flags)
+
+
+def test_reprocessing_does_not_duplicate_members(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    pipeline.build_members(session, case, actor=user.username)
+    pipeline.build_members(session, case, actor=user.username)
+    assert session.scalars(select(Member).where(Member.case_id == case.id)).all().__len__() == 1
+
+
+# ------------------------------------------------------------------ review
+
+
+def test_corrections_are_audited_and_marked_confirmed(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    member = pipeline.build_members(session, case, actor=user.username)[0]
+
+    from bms.models import AuditEvent
+
+    def audit_rows(field_key: str) -> list[AuditEvent]:
+        return list(
+            session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.entity_id == member.id, AuditEvent.field_key == field_key
+                )
+            )
+        )
+
+    before = member.first_name
+    pipeline.update_member_field(session, member, "first_name", "Rithik", actor=user.username)
+    session.flush()
+
+    assert member.first_name == "Rithik"
+    assert member.provenance["first_name"]["reviewed"] is True
+    rows = audit_rows("first_name")
+    assert len(rows) == 1
+    assert rows[0].old_value == before
+    assert rows[0].new_value == "Rithik"
+    assert rows[0].actor == user.username
+
+
+def test_a_no_op_edit_writes_no_audit_row(session, user, env):
+    """Re-saving an unchanged field must not pad the trail with noise."""
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    member = pipeline.build_members(session, case, actor=user.username)[0]
+
+    from bms.models import AuditEvent
+
+    pipeline.update_member_field(
+        session, member, "staff_id", member.staff_id, actor=user.username
+    )
+    session.flush()
+    rows = list(
+        session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.entity_id == member.id, AuditEvent.field_key == "staff_id"
+            )
+        )
+    )
+    assert rows == []
+
+
+def test_a_member_with_a_critical_flag_cannot_be_approved(session, user, env):
+    case = make_case(session, user, env)
+    # No documents and no identity: mandatory fields will be missing.
+    pipeline.build_members(session, case, actor=user.username)
+    member = session.scalars(select(Member).where(Member.case_id == case.id)).first()
+    assert member is not None
+    with pytest.raises(PermissionError, match="cannot be overridden"):
+        pipeline.approve_member(session, case, member, actor=user.username)
+
+
+# ------------------------------------------------------------------ export
+
+
+def _complete(member) -> None:
+    member.first_name = "Rithick"
+    member.last_name = "Kannadhasan"
+    member.date_of_birth = "1990-03-07"
+    member.gender = "Male"
+    member.marital_status = "Single"
+    member.nationality = "India"
+    member.relation = "Principal"
+    member.category = "CAT C"
+    member.effective_date = date.today().isoformat()
+    member.emirates_id = "784-1998-0432182-8"
+    member.provenance = {}
+
+
+def test_full_addition_export_produces_both_workbooks(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Passport.txt", PASSPORT_TEXT.encode(), actor=user.username)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    member = pipeline.build_members(session, case, actor=user.username)[0]
+
+    _complete(member)
+    pipeline.revalidate_member(session, case, member)
+    pipeline.approve_member(session, case, member, actor=user.username)
+
+    portal, log = pipeline.export_case(
+        session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+    )
+    assert portal.row_count == 1 and portal.fingerprint_ok
+    assert log.row_count == 1
+
+    storage = ExportStorage(env)
+    assert storage.absolute(portal.relative_path).exists()
+    assert storage.absolute(log.relative_path).exists()
+
+
+def test_export_is_blocked_while_a_critical_flag_is_open(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.build_members(session, case, actor=user.username)
+    with pytest.raises(pipeline.ExportBlocked):
+        pipeline.export_case(
+            session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+        )
+
+
+def test_export_requires_at_least_one_approved_member(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    pipeline.analyse_files(session, case, actor=user.username, pipeline=text_only_pipeline())
+    member = pipeline.build_members(session, case, actor=user.username)[0]
+    _complete(member)
+    pipeline.revalidate_member(session, case, member)
+    # Deliberately not approved.
+    with pytest.raises(pipeline.ExportBlocked, match="approved"):
+        pipeline.export_case(
+            session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+        )
+
+
+def test_deletion_workflow_exports_the_nas_deletion_template(session, user, env):
+    case = make_case(
+        session,
+        user,
+        env,
+        transaction="deletion",
+        instruction=(
+            "Please cancel the below staff and share the COC.\n"
+            "BASATIN ID Card Number Name\n"
+            "12373 EH2F-6FJF-LFL2-FLED Pashupati Mandal\n"
+        ),
+    )
+    pipeline.build_members(session, case, actor=user.username)
+    member = session.scalars(select(Member).where(Member.case_id == case.id)).first()
+    member.member_card_no = "EH2F-6FJF-LFL2-FLED"
+    member.deletion_reason = "Resignation"
+    member.effective_date = date.today().isoformat()
+    pipeline.revalidate_member(session, case, member)
+    pipeline.approve_member(session, case, member, actor=user.username)
+
+    portal, _ = pipeline.export_case(
+        session, case, template_key="nas.deletion.v1", actor=user.username, config=env
+    )
+    assert portal.row_count == 1
+    assert portal.template_key == "nas.deletion.v1"
+
+
+# --------------------------------------------------------------------- log
+
+
+def test_log_entry_leaves_post_submission_fields_null(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.build_members(session, case, actor=user.username)
+    member = session.scalars(select(Member).where(Member.case_id == case.id)).first()
+    entry = log_output.build_entry(case, member, shared_by="JAHNVI")
+
+    assert entry.request_ref_no is None
+    assert entry.request_sent_date_to_insurer is None
+    assert entry.card_no is None
+    assert entry.card_receive_and_sent_date is None
+    assert entry.saiba_voucher_no is None
+    assert entry.bbm_invoice_date is None
+
+
+def test_recording_submission_fills_only_its_own_fields():
+    entry = LogEntry(case_id="c", member_id="m")
+    changes = log_output.record_event(
+        entry, "submitted_to_insurer", {"request_sent_date_to_insurer": "05/08/2026"}
+    )
+    assert entry.request_sent_date_to_insurer == "05/08/2026"
+    assert entry.card_no is None
+    assert changes["request_sent_date_to_insurer"] == (None, "05/08/2026")
+
+
+def test_recording_refuses_a_field_outside_the_event():
+    entry = LogEntry(case_id="c", member_id="m")
+    with pytest.raises(log_output.NotRecordable):
+        log_output.record_event(entry, "submitted_to_insurer", {"card_no": "12345"})
+
+
+@pytest.mark.parametrize("placeholder", ["N/A", "Pending", "-", "0", "TBC"])
+def test_recording_refuses_placeholder_values(placeholder):
+    entry = LogEntry(case_id="c", member_id="m")
+    with pytest.raises(log_output.NotRecordable, match="left blank"):
+        log_output.record_event(entry, "card_received", {"card_no": placeholder})
+
+
+# ------------------------------------------------------------------- purge
+
+
+def test_purge_removes_documents_after_closure_but_keeps_the_record(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    record = session.scalars(select(CaseFile).where(CaseFile.case_id == case.id)).one()
+    digest = record.sha256
+
+    pipeline.close_case(session, case, actor=user.username)
+    case.closed_at = datetime.now(timezone.utc) - timedelta(hours=48)
+    session.flush()
+
+    result = pipeline.purge_closed_cases(session, config=env)
+    assert result.cases == 1 and result.files == 1
+
+    from bms.storage import Storage
+
+    assert not Storage(env).exists(digest)
+    assert session.get(Case, case.id) is not None
+    assert session.get(CaseFile, record.id).status == FileStatus.PURGED.value
+
+
+def test_purge_leaves_recently_closed_cases_alone(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    pipeline.close_case(session, case, actor=user.username)
+    session.flush()
+    assert pipeline.purge_closed_cases(session, config=env).cases == 0
+
+
+def test_purge_never_touches_an_open_case(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.add_upload(session, case, "Visa.txt", VISA_TEXT.encode(), actor=user.username)
+    session.flush()
+    assert pipeline.purge_closed_cases(session, config=env).cases == 0
+
+
+def test_purge_can_be_disabled(session, user, env):
+    case = make_case(session, user, env)
+    pipeline.close_case(session, case, actor=user.username)
+    case.closed_at = datetime.now(timezone.utc) - timedelta(days=7)
+    session.flush()
+    disabled = Settings(
+        database_url=env.database_url, data_root=env.data_root, purge_enabled=False
+    )
+    assert pipeline.purge_closed_cases(session, config=disabled).cases == 0

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Cases{% endblock %}
+{% block content %}
+<h1>Cases</h1>
+<p><a class="btn" href="/cases/new">New case</a></p>
+<div class="card">
+{% if cases %}
+<table>
+  <tr><th>Reference</th><th>Client</th><th>Insurer</th><th>Type</th><th>Status</th><th>Created</th></tr>
+  {% for case in cases %}
+  <tr>
+    <td><a href="/cases/{{ case.id }}">{{ case.reference }}</a></td>
+    <td>{{ case.client_name }}{% if case.sub_group %} <span class="muted">/ {{ case.sub_group }}</span>{% endif %}</td>
+    <td>{{ case.insurer }}</td>
+    <td>{{ case.transaction_type }}</td>
+    <td><span class="pill">{{ case.status }}</span></td>
+    <td class="muted">{{ case.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No cases yet. Create one to begin.</p>
+{% endif %}
+</div>
+{% endblock %}

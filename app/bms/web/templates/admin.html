@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Administration{% endblock %}
+{% block content %}
+<h1>Administration</h1>
+<p class="muted">Accounts and the client master. Administration does not confer any
+processing privilege, and no role can override a critical error.</p>
+
+{% if imported %}<div class="notice">Client master import: {{ imported }}</div>{% endif %}
+
+<div class="card">
+  <h2>Users</h2>
+  <table>
+    <tr><th>Username</th><th>Display name</th><th>Log associate</th><th>Admin</th><th>Reset password</th></tr>
+    {% for u in users %}
+    <tr>
+      <td>{{ u.username }}</td>
+      <td>{{ u.display_name }}</td>
+      <td>{{ u.log_associate or '—' }}</td>
+      <td>{% if u.is_admin %}yes{% else %}<span class="muted">no</span>{% endif %}</td>
+      <td>
+        <form method="post" action="/admin/users/{{ u.id }}/password" class="inline">
+          <input type="password" name="password" placeholder="new password" style="width:12rem" required minlength="10">
+          <button class="secondary">Reset</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <h3 style="margin-top:1.25rem">Add a user</h3>
+  <form method="post" action="/admin/users" class="grid three">
+    <div><label for="username">Username *</label><input type="text" id="username" name="username" required></div>
+    <div><label for="display_name">Display name</label><input type="text" id="display_name" name="display_name"></div>
+    <div><label for="log_associate">Log associate (SHARED BY)</label><input type="text" id="log_associate" name="log_associate" placeholder="e.g. JAHNVI"></div>
+    <div><label for="password">Password * (min 10)</label><input type="password" id="password" name="password" required minlength="10"></div>
+    <div><label for="is_admin">Administrator</label>
+      <select id="is_admin" name="is_admin"><option value="">No</option><option value="1">Yes</option></select></div>
+    <div style="align-self:end"><button type="submit">Create user</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Client master</h2>
+  <p class="muted">Companies, their sub-groups, legal entities and insurer policies.
+  Shared by every user; case creation reads from here.</p>
+
+  {% if clients %}
+  <table>
+    <tr><th>Company</th><th>Code</th><th>Sub-groups</th><th>Legal entities</th><th>Policies</th><th></th></tr>
+    {% for c in clients %}
+    <tr>
+      <td><a href="/admin/clients/{{ c.id }}">{{ c.name }}</a></td>
+      <td class="muted">{{ c.code or '—' }}</td>
+      <td>{{ c.sub_groups|length }}</td>
+      <td>{{ c.legal_entities|length }}</td>
+      <td>{{ c.policies|length }}</td>
+      <td><a href="/admin/clients/{{ c.id }}">Manage</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">The client master is empty. Add a company below, or import a workbook.</p>
+  {% endif %}
+
+  <h3 style="margin-top:1.25rem">Add a company</h3>
+  <form method="post" action="/admin/clients" class="grid three">
+    <div><label for="name">Company name *</label><input type="text" id="name" name="name" required></div>
+    <div><label for="code">Client code</label><input type="text" id="code" name="code"></div>
+    <div style="align-self:end"><button type="submit">Add company</button></div>
+  </form>
+
+  <h3 style="margin-top:1.25rem">Import from Excel</h3>
+  <form method="post" action="/admin/clients/import" enctype="multipart/form-data">
+    <input type="file" name="workbook" accept=".xlsx" required>
+    <button class="secondary">Import</button>
+  </form>
+  <p class="muted">One row per company / sub-group / policy. Recognised column headings:
+  Client, Code, Sub-Group, Legal Entity, Contract Name, Insurer, Network, Policy No,
+  Category, Emirate, Addition Template, Deletion Template. Blank cells are skipped and
+  never overwrite an existing value.</p>
+</div>
+{% endblock %}

@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# Deployment configuration. install.sh writes BMS_SECRET_KEY into app/.env --
+# it must never be committed. deploy/.env.example is the tracked template.
+.env
+!deploy/.env.example
+
+# Runtime data: uploaded documents, generated workbooks, the prototype database.
+var/
+*.db
+*.sqlite3
+
+# Offline install bundle: ~55MB of third-party wheels, rebuilt on demand.
+# Shipped inside the release package, never committed.
+deploy/wheelhouse/

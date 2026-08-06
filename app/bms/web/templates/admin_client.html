@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name }}{% endblock %}
+{% block content %}
+<p class="muted"><a href="/admin">&larr; Administration</a></p>
+<h1>{{ client.name }}</h1>
+<p class="muted">{% if client.code %}Code {{ client.code }} &middot; {% endif %}Client master entry</p>
+
+<div class="card">
+  <h2>Sub-groups</h2>
+  <p class="muted">Recorded on every BMS log row. The emirate here drives the deletion
+  effective-date rule: Abu Dhabi uses the processing date, Dubai uses cancellation + 30 days.</p>
+  {% if client.sub_groups %}
+  <table>
+    <tr><th>Sub-group</th><th>Emirate</th></tr>
+    {% for s in client.sub_groups %}<tr><td>{{ s.name }}</td><td>{{ s.emirate or '—' }}</td></tr>{% endfor %}
+  </table>
+  {% else %}<p class="muted">None yet.</p>{% endif %}
+  <form method="post" action="/admin/clients/{{ client.id }}/sub-groups" class="grid three" style="margin-top:.75rem">
+    <div><label for="sg_name">Sub-group name *</label><input type="text" id="sg_name" name="name" required></div>
+    <div><label for="sg_emirate">Emirate</label>
+      <select id="sg_emirate" name="emirate">
+        <option value="">(not set)</option>
+        {% for e in emirates %}<option value="{{ e }}">{{ e }}</option>{% endfor %}
+      </select></div>
+    <div style="align-self:end"><button type="submit">Add sub-group</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Legal entities</h2>
+  <p class="muted">The contract literal is written into the insurer template exactly as
+  entered here, including any spelling the insurer's own dropdown uses.</p>
+  {% if client.legal_entities %}
+  <table>
+    <tr><th>Entity</th><th>Contract literal used in the portal template</th></tr>
+    {% for e in client.legal_entities %}<tr><td>{{ e.name }}</td><td>{{ e.contract_name or e.name }}</td></tr>{% endfor %}
+  </table>
+  {% else %}<p class="muted">None yet.</p>{% endif %}
+  <form method="post" action="/admin/clients/{{ client.id }}/entities" class="grid two" style="margin-top:.75rem">
+    <div><label for="e_name">Entity name *</label><input type="text" id="e_name" name="name" required></div>
+    <div><label for="e_contract">Contract literal</label><input type="text" id="e_contract" name="contract_name" placeholder="exactly as the insurer template expects"></div>
+    <div style="align-self:end"><button type="submit">Add entity</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Insurer policies</h2>
+  {% if client.policies %}
+  <table>
+    <tr><th>Insurer</th><th>Network</th><th>Policy no.</th><th>Category</th><th>Emirate</th><th>Addition template</th><th>Deletion template</th></tr>
+    {% for p in client.policies %}
+    <tr>
+      <td>{{ p.insurer }}</td><td>{{ p.network or '—' }}</td><td>{{ p.policy_no or '—' }}</td>
+      <td>{{ p.category or '—' }}</td><td>{{ p.emirate or '—' }}</td>
+      <td class="muted">{{ p.addition_template_key or '—' }}</td>
+      <td class="muted">{{ p.deletion_template_key or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">None yet.</p>{% endif %}
+  <form method="post" action="/admin/clients/{{ client.id }}/policies" class="grid three" style="margin-top:.75rem">
+    <div><label for="p_insurer">Insurer / TPA *</label><input type="text" id="p_insurer" name="insurer" required></div>
+    <div><label for="p_network">Network</label><input type="text" id="p_network" name="network"></div>
+    <div><label for="p_policy">Policy no.</label><input type="text" id="p_policy" name="policy_no"></div>
+    <div><label for="p_category">Category</label><input type="text" id="p_category" name="category"></div>
+    <div><label for="p_emirate">Emirate</label>
+      <select id="p_emirate" name="emirate"><option value="">(not set)</option>
+        {% for e in emirates %}<option value="{{ e }}">{{ e }}</option>{% endfor %}</select></div>
+    <div><label for="p_entity">Legal entity</label>
+      <select id="p_entity" name="legal_entity_id"><option value="">(none)</option>
+        {% for e in client.legal_entities %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}</select></div>
+    <div><label for="p_add">Addition template</label>
+      <select id="p_add" name="addition_template_key"><option value="">(choose at export)</option>
+        {% for k in templates_available %}{% if 'deletion' not in k %}<option value="{{ k }}">{{ k }}</option>{% endif %}{% endfor %}</select></div>
+    <div><label for="p_del">Deletion template</label>
+      <select id="p_del" name="deletion_template_key"><option value="">(choose at export)</option>
+        {% for k in templates_available %}{% if 'deletion' in k %}<option value="{{ k }}">{{ k }}</option>{% endif %}{% endfor %}</select></div>
+    <div style="align-self:end"><button type="submit">Add policy</button></div>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block content %}
+<h1>Audit trail</h1>
+<p class="muted">Append-only. Records are never updated or deleted, including by the retention purge.</p>
+<div class="card">
+<table>
+  <tr><th>When</th><th>Actor</th><th>Action</th><th>Entity</th><th>Field</th><th>Old</th><th>New</th></tr>
+  {% for event in events %}
+  <tr>
+    <td class="muted">{{ event.at.strftime('%d/%m/%Y %H:%M:%S') }}</td>
+    <td>{{ event.actor }}</td>
+    <td>{{ event.action }}</td>
+    <td class="muted">{{ event.entity_type }}{% if event.entity_id %} {{ event.entity_id[:8] }}{% endif %}</td>
+    <td>{{ event.field_key or '' }}</td>
+    <td class="muted">{{ (event.old_value or '')[:60] }}</td>
+    <td>{{ (event.new_value or '')[:60] }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}
