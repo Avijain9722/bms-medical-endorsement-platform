@@ -49,9 +49,12 @@ jobs:
         include:
           - os: ubuntu-latest
             python: "3.11"
-          # The deployment target. 3.12 is what the offline Windows package pins.
           - os: windows-latest
             python: "3.12"
+          # The deployment target: 3.14 is what the offline Windows package now
+          # pins, so it is the version BMS will actually run.
+          - os: windows-latest
+            python: "3.14"
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +91,8 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Matches the version the offline Windows package pins.
+          python-version: "3.14"
 
       # No wheelhouse is committed, so this exercises the online path: the
       # installer falls back to PyPI and says so. The offline path is covered by
