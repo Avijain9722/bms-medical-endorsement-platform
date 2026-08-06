@@ -218,11 +218,22 @@ jobs:
       - name: Install offline, exactly as the BMS host does
         shell: pwsh
         run: |
-          $output = .\deploy\install.ps1 2>&1 | Tee-Object -Variable captured
-          $output | ForEach-Object { Write-Host $_ }
-          if (-not ($captured -match 'offline bundle found')) {
-            throw 'install.ps1 did not use the offline bundle -- this proved nothing'
+          # install.ps1 reports progress with Write-Host, which writes to the
+          # INFORMATION stream (6) -- not the success stream. `2>&1` redirects
+          # only errors, so capturing that way collects nothing and the check
+          # below fails even when the install succeeded. `6>&1` is the one that
+          # matters. Tee to a file rather than a variable so the output survives
+          # for inspection even if install.ps1 throws part way through.
+          .\deploy\install.ps1 6>&1 | Tee-Object -FilePath install-offline.log
+          $log = Get-Content install-offline.log -Raw
+          if ($log -notmatch 'offline bundle found') {
+            throw ('install.ps1 did not report using the offline bundle, so this ' +
+                   'job proved nothing about the offline path')
           }
+          if ($log -match 'downloading from PyPI') {
+            throw 'install.ps1 fell back to PyPI -- the bundle was not used'
+          }
+          Write-Host 'confirmed: installed from the bundle, with pip refusing the network'
 
       - name: Verify offline, and run the suite from the bundle
         shell: pwsh
