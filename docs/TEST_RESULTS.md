@@ -3,7 +3,7 @@
 The recorded run of the automated suite for the delivered build.
 
 ```
-269 tests · 0 failures · 0 errors · 0 skipped · 140.5s
+276 tests · 0 failures · 0 errors · 0 skipped · 140.5s
 ```
 
 Reproduce it with:
@@ -29,7 +29,7 @@ python3 -m pytest tests -q
 | Tesseract | 5.3.4, bundled at `vendor/tesseract/` — see §4 |
 | ClamAV | **not installed** — deliberate, see §4 |
 | Microsoft Excel | **not available** — Linux host, see §4 |
-| Result | **269 passed, 0 failed, 0 errored, 0 skipped** |
+| Result | **276 passed, 0 failed, 0 errored, 0 skipped** |
 
 Zero skips is the number to look at. Nothing was quietly stepped over because
 the host lacked something; where a capability is missing, the test asserts the
@@ -83,7 +83,7 @@ development container.
 | 15 | 6.1s | `test_infrastructure.py` | Virus scanning, Excel recalculation, the purge scheduler and Alembic migrations |
 | 14 | <0.1s | `test_intake.py` | Pasted-instruction parsing and archive expansion |
 | 25 | 12.4s | `test_web.py` | The web tier through the real ASGI app — routing, templates, session cookie, paging, page weight and every export-refusal branch |
-| **269** | **152.0s** | | |
+| **276** | **152.0s** | | |
 
 `test_logbook_and_package.py` and `test_template_preservation.py` account for
 four-fifths of the runtime because they open, populate and re-fingerprint real

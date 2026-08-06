@@ -540,3 +540,131 @@ def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkey
     assert "Traceback" not in response.text
     assert "RuntimeError" not in response.text
     assert re.search(r"<code>[0-9a-f]{12}</code>", response.text), "a reference to quote"
+
+
+# --------------------------------------------------- hardening and efficiency
+
+
+def test_repeated_wrong_passwords_lock_the_account_out(client):
+    """Unthrottled, the login form is two problems at once: an unlimited guessing
+    oracle, and a way for one unauthenticated client to burn the host's CPU --
+    every attempt costs 240,000 PBKDF2 rounds by design."""
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for _ in range(security.FAILURE_LIMIT):
+            refused = client.post("/login", data={"username": "tester", "password": "wrong"})
+            assert "Incorrect username or password" in refused.text
+
+        blocked = client.post("/login", data={"username": "tester", "password": "wrong"})
+        assert "Too many failed sign-in attempts" in blocked.text
+
+        # The correct password is refused too while the lockout stands, so the
+        # throttle cannot be stepped around by guessing right on the next try.
+        assert client.post(
+            "/login", data={"username": "tester", "password": "secret"}
+        ).status_code == 200
+    finally:
+        security.reset_throttle()
+
+
+def test_a_successful_sign_in_clears_the_failure_count(client):
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for _ in range(security.FAILURE_LIMIT - 1):
+            client.post("/login", data={"username": "tester", "password": "wrong"})
+        assert client.post(
+            "/login", data={"username": "tester", "password": "secret"}
+        ).status_code == 303
+        assert security.locked_out("user:tester") == 0
+    finally:
+        security.reset_throttle()
+
+
+def test_a_disabled_account_fails_exactly_like_a_wrong_password(client):
+    """So the form cannot be used to discover which accounts exist or are live."""
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        with db.session_scope() as session:
+            session.scalar(select(User).where(User.username == "tester")).active = False
+        refused = client.post("/login", data={"username": "tester", "password": "secret"})
+        assert refused.status_code == 200
+        assert "Incorrect username or password" in refused.text
+        assert client.cookies.get("bms_session") is None
+    finally:
+        security.reset_throttle()
+
+
+def test_every_response_carries_the_browser_defences(client):
+    """The platform serves member identity data: a page of it must not be
+    frameable, sniffable, or leak its case and member ids through Referer."""
+    for path in ("/login", "/"):
+        headers = client.get(path).headers
+        assert headers["X-Frame-Options"] == "DENY"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert headers["Referrer-Policy"] == "no-referrer"
+        policy = headers["Content-Security-Policy"]
+        assert "default-src 'self'" in policy
+        assert "frame-ancestors 'none'" in policy
+        assert "object-src 'none'" in policy
+
+
+def test_hsts_is_only_sent_when_the_cookie_is_secure(client):
+    """Promising HTTPS-only over a plain-HTTP deployment would lock users out."""
+    assert "Strict-Transport-Security" not in client.get("/login").headers
+
+
+def test_an_oversized_upload_is_refused_without_being_held_in_memory(client, monkeypatch):
+    """The limit was only applied after `await read()` had pulled the whole body
+    into RAM, so it could not prevent what it existed to prevent."""
+    sign_in(client)
+    created = client.post(
+        "/cases",
+        data={"client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition",
+              "bms_comments": ""},
+    )
+    case_id = created.headers["location"].rsplit("/", 1)[-1]
+
+    import dataclasses
+
+    # Settings is frozen by design, so swap the object rather than mutate it.
+    monkeypatch.setattr(
+        web_app, "settings", dataclasses.replace(web_app.settings, max_upload_bytes=4096)
+    )
+    huge = b"x" * (256 * 1024)
+    response = client.post(
+        f"/cases/{case_id}/upload", files={"files": ("huge.txt", io.BytesIO(huge), "text/plain")}
+    )
+    assert response.status_code == 303
+
+    from bms.models import CaseFile
+
+    with db.session_scope() as session:
+        stored = session.scalars(select(CaseFile).where(CaseFile.case_id == case_id)).all()
+    assert stored == [], "an oversized file must never reach storage"
+
+
+def test_reading_stops_at_the_limit_rather_than_buffering_everything():
+    """Peak memory is bounded by the limit, whatever the client sends."""
+    import asyncio
+
+    class Endless:
+        """A body that never ends -- the shape of the attack."""
+
+        def __init__(self):
+            self.served = 0
+
+        async def read(self, size: int = -1) -> bytes:
+            self.served += size
+            return b"y" * size
+
+    body = Endless()
+    result = asyncio.run(web_app._read_bounded(body, 1024 * 1024))
+    assert result is None
+    # Bounded to roughly the limit plus the one chunk that crossed it.
+    assert body.served <= 3 * 1024 * 1024

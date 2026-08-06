@@ -46,7 +46,17 @@ from ..outputs.mapping import UnsupportedValue
 from ..registry.generate import StructuralDrift, UnknownField
 from ..outputs.nas import SUPPORTED_KEYS
 from ..storage import ExportStorage
-from .security import COOKIE_NAME, hash_password, issue_session, read_session, verify_password
+from .security import (
+    COOKIE_NAME,
+    SESSION_MAX_AGE_SECONDS,
+    hash_password,
+    issue_session,
+    locked_out,
+    read_session,
+    record_failure,
+    record_success,
+    verify_password,
+)
 
 logger = logging.getLogger("bms.web")
 
@@ -73,6 +83,35 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Browser-side defences, on every response.
+
+    The platform serves member identity data, so a page of it must not be
+    frameable by another site, must not be sniffed into a different content type,
+    and must not leak its URL -- which contains case and member ids -- in a
+    Referer header. The CSP also enforces at the browser what the code already
+    guarantees: nothing loads from anywhere but this host.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'; object-src 'none'",
+    )
+    if settings.cookie_secure:
+        # Only meaningful over TLS, and actively harmful to send otherwise.
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
 
 
 def _ensure_seed_user() -> None:
@@ -278,17 +317,46 @@ def login(
     password: str = Form(...),
     session: Session = Depends(get_session),
 ):
+    # Throttle on the username and on the caller's address: the first stops one
+    # account being ground down, the second stops one client working through many
+    # accounts. Checked BEFORE hashing, so a locked-out caller cannot keep
+    # spending 240,000 PBKDF2 rounds of server CPU per attempt.
+    client_key = f"ip:{request.client.host if request.client else 'unknown'}"
+    user_key = f"user:{username.strip().lower()}"
+    for key in (user_key, client_key):
+        remaining = locked_out(key)
+        if remaining:
+            logger.warning("login refused, throttled: %s", key)
+            return render(
+                request,
+                "login.html",
+                error=(
+                    "Too many failed sign-in attempts. Try again in "
+                    f"{max(1, remaining // 60)} minute(s), or ask an administrator "
+                    "to reset your password."
+                ),
+            )
+
     user = session.scalar(select(User).where(User.username == username))
-    if user is None or not verify_password(password, user.password_hash):
+    if user is None or not verify_password(password, user.password_hash) or not user.active:
+        # A disabled account fails identically to a wrong password, so the form
+        # cannot be used to discover which accounts exist or are still enabled.
+        for key in (user_key, client_key):
+            record_failure(key)
         return render(request, "login.html", error="Incorrect username or password.")
+
+    for key in (user_key, client_key):
+        record_success(key)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         COOKIE_NAME,
         issue_session(user.id),
         httponly=True,
         samesite="lax",
-        # The prototype is served inside the BMS network; set secure=True behind TLS.
-        secure=False,
+        # Set BMS_COOKIE_SECURE=true behind TLS. This used to be hard-coded False,
+        # so enabling it meant editing source on the production host.
+        secure=settings.cookie_secure,
+        max_age=SESSION_MAX_AGE_SECONDS,
     )
     return response
 
@@ -501,13 +569,41 @@ async def upload(
 ):
     case = _load_case(session, case_id)
     for upload_file in files:
-        data = await upload_file.read()
+        data = await _read_bounded(upload_file, settings.max_upload_bytes)
+        if data is None:
+            # Over the limit. add_upload records the same refusal for a file that
+            # arrives whole, so the operator sees one consistent message.
+            pipeline.record_oversize_upload(
+                session, case, upload_file.filename or "upload", actor=user.username
+            )
+            continue
         if not data:
             continue
         pipeline.add_upload(
             session, case, upload_file.filename or "upload", data, actor=user.username
         )
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
+
+
+async def _read_bounded(upload_file: UploadFile, limit: int) -> bytes | None:
+    """Read at most `limit` bytes, or give up.
+
+    `await upload_file.read()` pulls the whole body into memory and the size was
+    only checked afterwards, so the limit could not prevent what it existed to
+    prevent: a 10 GB upload was fully resident before anything rejected it. This
+    stops at the first chunk that crosses the limit, so peak memory is bounded by
+    the limit itself no matter what is sent.
+
+    Returns None when the file is too large.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await upload_file.read(1024 * 1024):
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @app.post("/cases/{case_id}/process")

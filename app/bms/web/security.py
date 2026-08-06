@@ -99,3 +99,58 @@ def read_session(token: str | None) -> str | None:
     if int(data.get("exp", 0)) < time.time():
         return None
     return data.get("uid")
+
+
+# ------------------------------------------------------------- login throttling
+
+# Verifying a password costs 240,000 PBKDF2 rounds by design -- expensive for an
+# attacker guessing, but equally expensive for the server, and the login form is
+# reachable without a session. Unthrottled it is therefore two problems at once:
+# an unlimited guessing oracle, and a way for one unauthenticated client to burn
+# the host's CPU. Throttling per username and per client address closes both.
+FAILURE_LIMIT = 5
+FAILURE_WINDOW_SECONDS = 15 * 60
+LOCKOUT_SECONDS = 15 * 60
+
+_failures: dict[str, list[float]] = {}
+_locked_until: dict[str, float] = {}
+
+
+def _prune(key: str, now: float) -> None:
+    recent = [t for t in _failures.get(key, []) if now - t < FAILURE_WINDOW_SECONDS]
+    if recent:
+        _failures[key] = recent
+    else:
+        _failures.pop(key, None)
+
+
+def locked_out(key: str, *, now: float | None = None) -> int:
+    """Seconds remaining on a lockout, or 0. Checked before any hashing."""
+    now = time.time() if now is None else now
+    until = _locked_until.get(key)
+    if until is None:
+        return 0
+    if until <= now:
+        _locked_until.pop(key, None)
+        _failures.pop(key, None)
+        return 0
+    return int(until - now)
+
+
+def record_failure(key: str, *, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    _prune(key, now)
+    _failures.setdefault(key, []).append(now)
+    if len(_failures[key]) >= FAILURE_LIMIT:
+        _locked_until[key] = now + LOCKOUT_SECONDS
+
+
+def record_success(key: str) -> None:
+    _failures.pop(key, None)
+    _locked_until.pop(key, None)
+
+
+def reset_throttle() -> None:
+    """Test helper: forget all recorded failures."""
+    _failures.clear()
+    _locked_until.clear()

@@ -264,6 +264,35 @@ selection — **1.3 KB, constant.**
 Both are held by tests that assert the page stays bounded as rows are added, so
 the next feature cannot quietly reintroduce the problem.
 
+## 4c. Where the time goes
+
+Measured with 8,000 cases and 40,000 members, files, flags and log rows — not
+reasoned about.
+
+**Indexes.** Twenty-four foreign keys carried four indexes between them, while
+`case_id` alone is a query predicate in twenty places. Every case screen
+therefore full-scanned five tables, at a cost that grew with the whole database
+rather than with the case being opened. All foreign keys, the log's filter
+columns and the `created_at` ordering columns are now indexed.
+
+| Screen | Before | After |
+| --- | ---: | ---: |
+| One case | 22.4 ms *(at 2,000 cases)* | **7.9 ms** *(at 8,000)* |
+| Operational log | 38.6 ms | **13.4 ms** |
+| Case list | 14.1 ms | **6.7 ms** |
+
+The absolute numbers matter less than the shape: opening a case was linear in
+the size of the database and is now effectively flat.
+
+**The log's filter dropdowns** ran three `SELECT DISTINCT` over the whole table
+plus a `COUNT`, so four full scans per page load of a table that only ever
+grows. Indexed, each is an index scan.
+
+**Uploads** were read whole into memory and size-checked afterwards, so the
+limit could not prevent what it existed to prevent — a body of any size was
+fully resident before anything rejected it. Reading now stops at the first chunk
+that crosses the limit, bounding peak memory by the limit itself.
+
 ## 5. Security posture
 
 | | |

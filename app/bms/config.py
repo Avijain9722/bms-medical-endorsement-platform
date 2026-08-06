@@ -79,6 +79,11 @@ class Settings:
     # which case `python3 -m bms.cli purge` can be driven by an external timer.
     purge_interval_minutes: int = int(os.environ.get("BMS_PURGE_INTERVAL_MINUTES", 60))
 
+    # Set true behind TLS so the session cookie is never sent in the clear. It
+    # was hard-coded False, which meant enabling it required editing source on
+    # the production host.
+    cookie_secure: bool = _bool("BMS_COOKIE_SECURE", False)
+
     # OCR must run locally. No document may be sent to an external service.
     ocr_enabled: bool = _bool("BMS_OCR_ENABLED", True)
     # A copy under vendor/tesseract/ is picked up automatically; BMS_TESSERACT_CMD

@@ -104,8 +104,16 @@ Editing the cookie invalidates the signature and drops you at the sign-in
 screen. Sessions end on sign-out, at expiry, or when the secret key changes.
 
 **Behind TLS.** Serve the application behind HTTPS in any real deployment and
-set `secure=True` on the session cookie in `bms/web/app.py`. Over plain HTTP the
-cookie is visible to anyone on the network path.
+set `BMS_COOKIE_SECURE=true`. The cookie is then never sent in the clear, and
+HSTS is advertised. Over plain HTTP the cookie is visible to anyone on the
+network path. Leave it `false` until TLS is actually in place — a secure cookie
+over HTTP is never sent at all, which locks everyone out.
+
+**Brute force.** Five failed sign-ins for one username, or from one address,
+within fifteen minutes locks that username or address out for fifteen minutes.
+The check runs before any password hashing, so a locked-out caller cannot keep
+spending server CPU. An administrator can reset the password immediately rather
+than waiting out the lockout.
 
 **Identity is used, not just checked.** The signed-in user fills the log's
 `SHARED BY` column and stamps every audit row. Shared accounts destroy both.

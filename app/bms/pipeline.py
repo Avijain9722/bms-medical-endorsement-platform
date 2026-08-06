@@ -120,6 +120,37 @@ def create_case(
     return case
 
 
+def record_oversize_upload(
+    session: Session,
+    case: Case,
+    filename: str,
+    *,
+    actor: str,
+) -> UploadOutcome:
+    """Refuse a file that was abandoned mid-read for exceeding the size limit.
+
+    The web tier stops reading as soon as a body crosses the limit, so the bytes
+    never exist here to hand to `add_upload`. The refusal is recorded the same
+    way either route reaches it, so the operator sees one message.
+    """
+    audit.record(
+        session,
+        action="file.rejected",
+        entity_type="case",
+        entity_id=case.id,
+        case_id=case.id,
+        actor=actor,
+        detail={"filename": filename, "reason": "exceeds the maximum upload size"},
+    )
+    return UploadOutcome(
+        stored=[],
+        duplicates=[],
+        skipped=[(filename, "exceeds the maximum upload size")],
+        password_protected=False,
+        infected=[],
+    )
+
+
 def add_upload(
     session: Session,
     case: Case,
