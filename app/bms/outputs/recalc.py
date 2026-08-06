@@ -17,12 +17,15 @@ being presented as finished.
 
 from __future__ import annotations
 
+import logging
 import platform
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger("bms.recalc")
 
 # Templates whose output should be opened by Excel before it is handed over.
 NEEDS_RECALC = frozenset({"bms.log.2026", "daman.addition.v1"})
@@ -40,13 +43,31 @@ class RecalcResult:
 
 
 def excel_available() -> tuple[bool, str]:
-    """Whether a local Excel automation route exists on this host."""
+    """Whether a local Excel automation route exists on this host.
+
+    pywin32 importing proves only that the bridge is installed, not that there is
+    anything on the other side of it. A Windows host with pywin32 and no Excel --
+    or an Excel that is not registered for the account the service runs as --
+    used to report itself as capable and then fail at export time with
+    `com_error: Invalid class string`, turning an honest degradation into a
+    crash. Resolving the CLSID answers the real question and does not start Excel.
+    """
     if platform.system() != "Windows":
         return False, f"host is {platform.system()}, and Excel automation requires Windows"
     try:
+        import pythoncom
         import win32com.client  # noqa: F401
     except ImportError:
         return False, "pywin32 is not installed"
+    try:
+        pythoncom.CoInitialize()
+        try:
+            pythoncom.CLSIDFromProgID("Excel.Application")
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception:
+        # Not installed, not registered, or not visible to this account.
+        return False, "Microsoft Excel is not installed or not registered on this host"
     return True, "Excel COM automation available"
 
 
@@ -76,7 +97,12 @@ def _recalculate_with_com(path: Path) -> RecalcResult:  # pragma: no cover - Win
         return RecalcResult(True, "excel_com", "recalculated and saved by Excel")
     finally:
         if excel is not None:
-            excel.Quit()
+            # Quitting can itself fail if Excel died mid-call. Losing the result
+            # to a cleanup error would be worse than leaking the process.
+            try:
+                excel.Quit()
+            except Exception:
+                pass
         pythoncom.CoUninitialize()
 
 
@@ -94,7 +120,21 @@ def recalculate(path: str | Path, *, template_key: str | None = None) -> RecalcR
             f"formulas were written but not evaluated: {reason}. "
             "The file is complete and opens correctly; Excel will calculate on first open.",
         )
-    return _recalculate_with_com(path)  # pragma: no cover - Windows only
+    try:
+        return _recalculate_with_com(path)  # pragma: no cover - Windows only
+    except Exception as error:  # pragma: no cover - Windows only
+        # Excel can fail for reasons no probe predicts: a licence prompt, a
+        # crashed instance, no desktop for the service account. The workbook on
+        # disk is already correct and complete -- only its formulas are
+        # uncalculated -- so this degrades exactly as an absent Excel does. An
+        # export must never be lost to a recalculation that could not run.
+        logger.warning("Excel recalculation failed for %s: %s", path.name, error)
+        return RecalcResult(
+            False,
+            "failed",
+            f"formulas were written but not evaluated: Excel could not be driven ({error}). "
+            "The file is complete and opens correctly; Excel will calculate on first open.",
+        )
 
 
 def describe_host() -> dict:

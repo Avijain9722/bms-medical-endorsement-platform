@@ -284,3 +284,47 @@ def test_migrations_can_be_reversed(tmp_path):
         row[0] for row in connection.execute("select name from sqlite_master where type='table'")
     } - {"alembic_version"}
     assert remaining == set()
+
+
+def test_a_com_failure_degrades_instead_of_losing_the_export(tmp_path, monkeypatch):
+    """Found by the first Windows CI run, which is the only place it could show.
+
+    `excel_available()` checked that pywin32 imported and concluded Excel was
+    usable. On a Windows host with pywin32 but no Excel -- or an Excel not
+    registered for the service account -- COM then raised
+    `com_error: Invalid class string`, which propagated out and failed the whole
+    export. The workbook on disk was already correct; only its formulas were
+    uncalculated, which is precisely the state the platform is designed to
+    degrade to.
+    """
+    target = tmp_path / "log.xlsx"
+    target.write_bytes(b"PK\x03\x04placeholder")
+
+    monkeypatch.setattr(recalc, "excel_available", lambda: (True, "pretending Excel is here"))
+
+    def excel_is_not_really_there(_path):
+        raise OSError("(-2147221005, 'Invalid class string', None, None)")
+
+    monkeypatch.setattr(recalc, "_recalculate_with_com", excel_is_not_really_there)
+
+    result = recalc.recalculate(target, template_key="bms.log.2026")
+
+    assert result.pending, "a failed recalculation must not be reported as done"
+    assert result.engine == "failed"
+    assert "Invalid class string" in result.detail
+    assert "opens correctly" in result.detail
+    assert target.exists(), "the generated workbook must survive"
+
+
+def test_availability_is_about_excel_not_about_pywin32():
+    """The probe must answer 'can Excel be driven', not 'is the bridge installed'."""
+    available, reason = recalc.excel_available()
+    if sys.platform != "win32":
+        assert not available
+        assert "Windows" in reason
+    else:  # pragma: no cover - only on a Windows host
+        # Either answer is legitimate; what matters is that a True here means
+        # Excel really is registered, not merely that pywin32 imported.
+        assert isinstance(available, bool)
+        if not available:
+            assert "pywin32" in reason or "Excel" in reason

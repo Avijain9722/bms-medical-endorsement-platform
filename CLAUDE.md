@@ -113,7 +113,7 @@ The suite picks new entries up automatically.
 
 ```bash
 cd app
-python -m pytest tests -q          # the whole suite, currently 282
+python -m pytest tests -q          # the whole suite, currently 284
 python tools/verify_sources.py     # supplied workbooks unaltered
 ```
 
