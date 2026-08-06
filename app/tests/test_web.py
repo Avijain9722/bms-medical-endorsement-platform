@@ -524,6 +524,45 @@ def test_every_export_refusal_is_explained_not_a_500(client, monkeypatch, except
     assert "Traceback" not in response.text
 
 
+def test_a_refusal_partway_through_leaves_no_half_export(client, monkeypatch):
+    """The portal workbook is recorded before the log is built.
+
+    So a refusal raised by the log step used to commit an Export row for a case
+    whose export never completed -- the request's session commits on the way out
+    regardless of what the route rendered. A refused export must leave nothing
+    behind but the reason.
+    """
+    from bms.models import Export
+    from bms.registry.generate import StructuralDrift
+
+    case_id = _approved_case(client)
+
+    def write_the_portal_row_then_refuse(session, case, **kwargs):
+        """Exactly the shape of the real thing: portal recorded, log refuses."""
+        session.add(
+            Export(
+                case_id=case.id,
+                kind="portal",
+                filename="half.xlsx",
+                relative_path="x/half.xlsx",
+                sha256="0" * 64,
+            )
+        )
+        session.flush()
+        raise StructuralDrift("bms.log.2026", ["header row moved"])
+
+    monkeypatch.setattr("bms.web.app.pipeline.export_case", write_the_portal_row_then_refuse)
+    refused = client.post(
+        f"/cases/{case_id}/export", data={"template_key": "nas.addition.aldar.v1"}
+    )
+    assert refused.status_code == 200
+    assert "no longer matches the master" in refused.text
+
+    with db.session_scope() as session:
+        recorded = session.scalars(select(Export).where(Export.case_id == case_id)).all()
+    assert recorded == [], f"a refused export recorded {len(recorded)} file(s)"
+
+
 def test_a_refused_export_shows_the_case_screen_the_case_screen_shows(client, monkeypatch):
     """The two routes that render case_detail.html had drifted apart.
 

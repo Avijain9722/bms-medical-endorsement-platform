@@ -843,6 +843,13 @@ def export(
         # on. Only ExportBlocked was handled before; the rest reached the browser
         # as an unexplained 500 -- worst of all StructuralDrift, which is the
         # check that stops a structurally damaged workbook being uploaded.
+        #
+        # Roll back before rendering. An export writes the portal workbook's row
+        # before it builds the log, so a refusal raised by the log step left the
+        # portal Export recorded against a case whose export never completed --
+        # the session commits on the way out of the request either way. A refused
+        # export must leave no record that it half happened.
+        session.rollback()
         return render(
             request,
             "case_detail.html",
