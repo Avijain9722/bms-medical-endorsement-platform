@@ -1,34 +1,9 @@
 {% extends "base.html" %}
-{% block title %}New case<script>
-// The client master, rendered server-side. Selecting a company narrows the
-// sub-group, entity and policy lists to that company's registered values.
-const BMS_CLIENTS = {{ clients | tojson }};
-function bmsFill(select, items, label) {
-  select.innerHTML = '<option value="">(none)</option>';
-  for (const item of items) {
-    const option = document.createElement('option');
-    option.value = item.id;
-    option.textContent = label(item);
-    select.appendChild(option);
-  }
-}
-function bmsClientChanged() {
-  const id = document.getElementById('client_id').value;
-  const client = BMS_CLIENTS.find(c => c.id === id);
-  const subs = document.getElementById('sub_group_id');
-  const entities = document.getElementById('legal_entity_id');
-  const policies = document.getElementById('client_policy_id');
-  if (!client) { bmsFill(subs, [], () => ''); bmsFill(entities, [], () => ''); bmsFill(policies, [], () => ''); return; }
-  bmsFill(subs, client.sub_groups, s => s.name + (s.emirate ? ' (' + s.emirate + ')' : ''));
-  bmsFill(entities, client.entities, e => e.name);
-  bmsFill(policies, client.policies, p => [p.insurer, p.policy_no, p.category].filter(Boolean).join(' \u00b7 '));
-}
-document.addEventListener('DOMContentLoaded', bmsClientChanged);
-</script>
-{% endblock %}
+{% block title %}New case{% endblock %}
 {% block content %}
 <h1>New case</h1>
 <form method="post" action="/cases" class="card grid two">
+  <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
   <div style="grid-column:1/-1">
     <label for="client_id">Company &mdash; from the client master</label>
     <select id="client_id" name="client_id" onchange="bmsClientChanged()">
@@ -74,9 +49,9 @@ document.addEventListener('DOMContentLoaded', bmsClientChanged);
   <div style="grid-column:1/-1"><button type="submit">Create case</button> <a class="btn secondary" href="/">Cancel</a></div>
 </form>
 <script>
-// The client master, rendered server-side. Selecting a company narrows the
-// sub-group, entity and policy lists to that company's registered values.
-const BMS_CLIENTS = {{ clients | tojson }};
+// Only the selected company's options are fetched, and only when it is chosen.
+// Embedding the whole client master here cost 707 KB at 500 companies -- almost
+// all of it for companies the operator was not going to pick.
 function bmsFill(select, items, label) {
   select.innerHTML = '<option value="">(none)</option>';
   for (const item of items) {
@@ -86,16 +61,30 @@ function bmsFill(select, items, label) {
     select.appendChild(option);
   }
 }
-function bmsClientChanged() {
+async function bmsClientChanged() {
   const id = document.getElementById('client_id').value;
-  const client = BMS_CLIENTS.find(c => c.id === id);
   const subs = document.getElementById('sub_group_id');
   const entities = document.getElementById('legal_entity_id');
   const policies = document.getElementById('client_policy_id');
-  if (!client) { bmsFill(subs, [], () => ''); bmsFill(entities, [], () => ''); bmsFill(policies, [], () => ''); return; }
-  bmsFill(subs, client.sub_groups, s => s.name + (s.emirate ? ' (' + s.emirate + ')' : ''));
-  bmsFill(entities, client.entities, e => e.name);
-  bmsFill(policies, client.policies, p => [p.insurer, p.policy_no, p.category].filter(Boolean).join(' \u00b7 '));
+  const clear = () => {
+    bmsFill(subs, [], () => ''); bmsFill(entities, [], () => ''); bmsFill(policies, [], () => '');
+  };
+  if (!id) { clear(); return; }
+  try {
+    const response = await fetch('/clients/' + encodeURIComponent(id) + '/options', {
+      headers: {'Accept': 'application/json'}
+    });
+    if (!response.ok) { clear(); return; }
+    const client = await response.json();
+    bmsFill(subs, client.sub_groups, s => s.name + (s.emirate ? ' (' + s.emirate + ')' : ''));
+    bmsFill(entities, client.entities, e => e.name);
+    bmsFill(policies, client.policies,
+            p => [p.insurer, p.policy_no, p.category].filter(Boolean).join(' \u00b7 '));
+  } catch (error) {
+    // Offline or the server refused: leave the dependent lists empty rather
+    // than half-filled. The typed fields below still accept a manual entry.
+    clear();
+  }
 }
 document.addEventListener('DOMContentLoaded', bmsClientChanged);
 </script>

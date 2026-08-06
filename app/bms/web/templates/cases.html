@@ -1,5 +1,19 @@
 {% extends "base.html" %}
-{% block title %}Cases{% endblock %}
+{% block title %}Cases{% if paging and paging.pages > 1 %}
+<p class="muted">
+  Showing {{ paging.first_row }}&ndash;{{ paging.last_row }} of {{ paging.total }}
+  &middot; page {{ paging.current }} of {{ paging.pages }}
+  {% if paging.has_previous %}
+    &middot; <a href="/?page=1">First</a>
+    &middot; <a href="/?page={{ paging.current - 1 }}">Previous</a>
+  {% endif %}
+  {% if paging.has_next %}
+    &middot; <a href="/?page={{ paging.current + 1 }}">Next</a>
+    &middot; <a href="/?page={{ paging.pages }}">Last</a>
+  {% endif %}
+</p>
+{% endif %}
+{% endblock %}
 {% block content %}
 <h1>Cases</h1>
 <p><a class="btn" href="/cases/new">New case</a></p>
@@ -22,4 +36,18 @@
 <p class="muted">No cases yet. Create one to begin.</p>
 {% endif %}
 </div>
+{% if paging and paging.pages > 1 %}
+<p class="muted">
+  Showing {{ paging.first_row }}&ndash;{{ paging.last_row }} of {{ paging.total }}
+  &middot; page {{ paging.current }} of {{ paging.pages }}
+  {% if paging.has_previous %}
+    &middot; <a href="/?page=1">First</a>
+    &middot; <a href="/?page={{ paging.current - 1 }}">Previous</a>
+  {% endif %}
+  {% if paging.has_next %}
+    &middot; <a href="/?page={{ paging.current + 1 }}">Next</a>
+    &middot; <a href="/?page={{ paging.pages }}">Last</a>
+  {% endif %}
+</p>
+{% endif %}
 {% endblock %}

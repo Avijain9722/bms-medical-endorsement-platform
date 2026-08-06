@@ -32,8 +32,16 @@ cd app
 python3 -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python3 -m alembic upgrade head
-uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
 ```
+
+On Windows the last line is `.venv\Scripts\python.exe -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000`.
+
+`.venv/bin/python -m uvicorn` rather than a bare `uvicorn`: the explicit path
+works whether or not the virtual environment is activated in this particular
+terminal. A bare `uvicorn` in a fresh terminal fails with
+`No module named uvicorn`, because it runs the system Python instead.
+
 
 Before that first start, set at minimum:
 
@@ -96,8 +104,16 @@ Editing the cookie invalidates the signature and drops you at the sign-in
 screen. Sessions end on sign-out, at expiry, or when the secret key changes.
 
 **Behind TLS.** Serve the application behind HTTPS in any real deployment and
-set `secure=True` on the session cookie in `bms/web/app.py`. Over plain HTTP the
-cookie is visible to anyone on the network path.
+set `BMS_COOKIE_SECURE=true`. The cookie is then never sent in the clear, and
+HSTS is advertised. Over plain HTTP the cookie is visible to anyone on the
+network path. Leave it `false` until TLS is actually in place — a secure cookie
+over HTTP is never sent at all, which locks everyone out.
+
+**Brute force.** Five failed sign-ins for one username, or from one address,
+within fifteen minutes locks that username or address out for fifteen minutes.
+The check runs before any password hashing, so a locked-out caller cannot keep
+spending server CPU. An administrator can reset the password immediately rather
+than waiting out the lockout.
 
 **Identity is used, not just checked.** The signed-in user fills the log's
 `SHARED BY` column and stamps every audit row. Shared accounts destroy both.
@@ -376,6 +392,30 @@ once no open case refers to them.
 ---
 
 ## 10. Troubleshooting
+
+**`ModuleNotFoundError: No module named uvicorn`** (or `alembic`, or `fastapi`).
+
+You are running the system Python instead of the platform's own. The virtual
+environment holds the dependencies, and a bare `uvicorn` only finds them if that
+environment is activated in the terminal you are typing into — which it is not in
+a freshly opened one.
+
+Use the launcher, which never has this problem:
+
+```bash
+./deploy/start-linux.sh                                          # Linux
+deploy\START-WINDOWS.bat                                        # Windows
+```
+
+Or address the environment's Python explicitly:
+
+```bash
+cd app && .venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+```
+
+If that still fails, the environment really is incomplete — re-run
+`deploy/install.sh` (or `install.ps1`). Deleting `app/.venv` first forces a
+clean rebuild.
 
 **Everyone is logged out after every restart.**
 `BMS_SECRET_KEY` is not set, so a new signing key is generated at each start. Set

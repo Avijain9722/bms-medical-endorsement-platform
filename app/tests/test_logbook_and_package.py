@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import BrowserClient  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -518,7 +519,7 @@ def test_log_screen_and_event_recording_through_the_ui(session, user, env):
     exported_case(session, user, env)
     session.commit()
 
-    http = TestClient(web_app.app, follow_redirects=False)
+    http = BrowserClient(web_app.app, follow_redirects=False)
     assert http.post(
         "/login", data={"username": "tester", "password": "a-long-test-password"}
     ).status_code == 303
@@ -560,7 +561,7 @@ def test_status_and_remarks_can_be_saved_through_the_ui(session, user, env):
     exported_case(session, user, env)
     session.commit()
 
-    http = TestClient(web_app.app, follow_redirects=False)
+    http = BrowserClient(web_app.app, follow_redirects=False)
     http.post("/login", data={"username": "tester", "password": "a-long-test-password"})
 
     with db.session_scope() as fresh:
@@ -590,7 +591,7 @@ def test_filtering_by_status_does_not_alter_any_entry(session, user, env):
     exported_case(session, user, env)
     session.commit()
 
-    http = TestClient(web_app.app, follow_redirects=False)
+    http = BrowserClient(web_app.app, follow_redirects=False)
     http.post("/login", data={"username": "tester", "password": "a-long-test-password"})
 
     with db.session_scope() as fresh:

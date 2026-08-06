@@ -7,11 +7,13 @@ are all covered.
 from __future__ import annotations
 
 import io
+import itertools
 import sys
 import zipfile
 from pathlib import Path
 
 import pytest
+from conftest import BrowserClient  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -67,7 +69,7 @@ def client(tmp_path, monkeypatch):
             )
         )
     # follow_redirects=False so 303s are asserted rather than silently followed.
-    return TestClient(web_app.app, follow_redirects=False)
+    return BrowserClient(web_app.app, follow_redirects=False)
 
 
 def sign_in(client: TestClient) -> None:
@@ -245,3 +247,507 @@ def test_health_reports_the_available_ocr_engines(client):
     assert payload["status"] == "ok"
     assert "ocr_engines" in payload
     assert payload["database"] == "sqlite"
+
+
+# ------------------------------------------------- paging and browser weight
+#
+# The operational log is the permanent record and only ever grows. A screen that
+# renders every matching row gets heavier every month until it stops being
+# usable, so these fix the shape of the pages rather than trusting them to stay
+# reasonable.
+
+
+_seeded = itertools.count()
+
+
+def _seed_log(count: int) -> list[str]:
+    """`count` log entries, each on its own case. Returns their ids.
+
+    Case references are globally unique, so the counter keeps repeat calls in
+    one test from colliding.
+    """
+    from datetime import date
+
+    from bms.models import LogEntry
+
+    ids = []
+    with db.session_scope() as session:
+        for index in range(count):
+            case = Case(
+                reference=f"L{next(_seeded):05d}", client_name="DEMO CLIENT", insurer="NAS",
+                transaction_type="addition", status="exported", bms_comments="",
+            )
+            session.add(case)
+            session.flush()
+            entry = LogEntry(
+                case_id=case.id, client_name="DEMO CLIENT", insurer="NAS",
+                beneficiary_name=f"Person {index}", relation="Principal",
+                entry_type="ADDITION", effective_date=date.today().isoformat(),
+                status="PENDING TO INSURER",
+            )
+            session.add(entry)
+            session.flush()
+            ids.append(entry.id)
+    return ids
+
+
+def test_the_log_shows_one_page_however_many_rows_there_are(client):
+    sign_in(client)
+    _seed_log(120)
+
+    page = client.get("/log")
+    assert page.status_code == 200
+    # 50 data rows plus the header row.
+    assert page.text.count("<tr") == web_app.PAGE_SIZE + 1
+    assert "120 row(s)" in page.text          # the total is still reported
+    assert "page 1 of 3" in page.text
+
+
+def test_paging_reaches_every_row_without_overlap(client):
+    sign_in(client)
+    _seed_log(120)
+
+    seen = []
+    for number in (1, 2, 3):
+        text = client.get(f"/log?page={number}").text
+        seen += [name for name in (f"Person {i}" for i in range(120)) if f">{name}<" in text]
+
+    assert len(seen) == 120, "every row should appear exactly once across the pages"
+    assert len(set(seen)) == 120
+
+
+def test_out_of_range_page_numbers_are_clamped_not_crashed(client):
+    """A hand-typed ?page=0 must not become a negative SQL OFFSET."""
+    sign_in(client)
+    _seed_log(60)
+
+    for value in ("0", "-5", "9999"):
+        response = client.get(f"/log?page={value}")
+        assert response.status_code == 200, value
+        assert "Person" in response.text
+
+
+def test_the_log_list_carries_no_per_row_editor(client):
+    """The five workflow forms live on the entry screen, not in every row.
+
+    Rendering them per row put thousands of controls in the DOM whether or not
+    anyone used them, which is what made the screen heavy.
+    """
+    sign_in(client)
+    _seed_log(50)
+
+    text = client.get("/log").text
+    # The only form posting to a log route is the export button.
+    assert text.count('action="/log/') == 1
+    assert 'action="/log/export"' in text
+    assert 'name="request_ref_no"' not in text
+    assert 'name="saiba_voucher_no"' not in text
+
+
+def test_the_entry_screen_carries_the_editor(client):
+    sign_in(client)
+    entry_id = _seed_log(1)[0]
+
+    page = client.get(f"/log/{entry_id}")
+    assert page.status_code == 200
+    for field in ("request_ref_no", "card_no", "saiba_voucher_no", "bbm_invoice_date", "remarks"):
+        assert f'name="{field}"' in page.text
+    assert client.get("/log/does-not-exist").status_code == 404
+
+
+def test_page_weight_does_not_grow_with_the_log(client):
+    """The guarantee, stated as a number: ten times the rows, same page.
+
+    Measured at 3.1 MB and 57,081 elements before paging, at 1,000 entries.
+    """
+    sign_in(client)
+
+    _seed_log(60)
+    small = client.get("/log").text
+
+    _seed_log(600)
+    large = client.get("/log").text
+
+    assert abs(len(large) - len(small)) < 2048, "page size should not track the row count"
+    for text in (small, large):
+        assert len(text.encode()) < 200 * 1024
+        assert text.count("<") < 5000
+
+
+def test_cases_and_audit_are_paged_too(client):
+    sign_in(client)
+    _seed_log(120)
+
+    cases = client.get("/")
+    assert cases.text.count("<tr") <= web_app.PAGE_SIZE + 1
+
+    audit = client.get("/audit")
+    assert audit.status_code == 200
+    assert audit.text.count("<tr") <= web_app.PAGE_SIZE + 1
+
+
+def test_the_case_form_does_not_embed_the_whole_client_master(client):
+    """It embedded every company's sub-groups, entities and policies -- 707 KB
+    of JSON at 500 companies, on every visit, nearly all of it unused."""
+    from bms.models import Client as ClientRecord, ClientPolicy, LegalEntity, SubGroup
+
+    sign_in(client)
+    with db.session_scope() as session:
+        for index in range(40):
+            record = ClientRecord(name=f"COMPANY {index:03d} TRADING L.L.C.")
+            session.add(record)
+            session.flush()
+            for k in range(3):
+                session.add(SubGroup(client_id=record.id, name=f"Division {k}", emirate="Dubai"))
+                session.add(LegalEntity(client_id=record.id, name=f"Entity {index}-{k}"))
+                session.add(
+                    ClientPolicy(client_id=record.id, insurer="NAS", policy_no=f"P{index}{k}")
+                )
+
+    page = client.get("/cases/new")
+    assert page.status_code == 200
+    # The company names are needed to choose from; their contents are not.
+    assert "COMPANY 000 TRADING L.L.C." in page.text
+    assert "Division 0" not in page.text
+    assert "Entity 0-0" not in page.text
+
+
+def test_one_companys_options_are_fetched_on_demand(client):
+    from bms.models import Client as ClientRecord, ClientPolicy, LegalEntity, SubGroup
+
+    sign_in(client)
+    with db.session_scope() as session:
+        record = ClientRecord(name="ACME GROUP LLC")
+        session.add(record)
+        session.flush()
+        session.add(SubGroup(client_id=record.id, name="Abu Dhabi Operations", emirate="Abu Dhabi"))
+        session.add(LegalEntity(client_id=record.id, name="ACME Trading LLC"))
+        session.add(ClientPolicy(client_id=record.id, insurer="NAS", policy_no="POL-1"))
+        client_id = record.id
+
+    payload = client.get(f"/clients/{client_id}/options")
+    assert payload.status_code == 200
+    body = payload.json()
+    assert body["name"] == "ACME GROUP LLC"
+    assert body["sub_groups"][0]["emirate"] == "Abu Dhabi"
+    assert body["entities"][0]["name"] == "ACME Trading LLC"
+    assert body["policies"][0]["policy_no"] == "POL-1"
+
+    assert client.get("/clients/nope/options").status_code == 404
+
+
+def test_the_client_master_is_not_readable_without_signing_in(client):
+    """It is BMS commercial data, not public reference."""
+    response = client.get("/clients/anything/options")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_the_case_form_title_is_a_title(client):
+    """The whole dropdown script once sat inside {% block title %}, so it was
+    rendered into <title> as well as the body."""
+    sign_in(client)
+    page = client.get("/cases/new")
+    import re
+
+    title = re.search(r"<title>(.*?)</title>", page.text, re.S).group(1)
+    assert title.strip() == "New case"
+    assert "<script" not in title
+    assert page.text.count("<script") == 1
+
+
+# ------------------------------------------------------------- error branches
+#
+# Four different refusals all mean "this must not be sent to the insurer". Only
+# one of them was handled; the rest reached the browser as an unexplained 500 --
+# worst of all StructuralDrift, the check that stops a damaged workbook being
+# uploaded to a portal.
+
+
+def _approved_case(client) -> str:
+    """A case with one approved member, ready to export."""
+    from datetime import date
+
+    sign_in(client)
+    created = client.post(
+        "/cases",
+        data={
+            "client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition",
+            "bms_comments": "Add 90001 Demo Person Single CAT B",
+        },
+    )
+    case_id = created.headers["location"].rsplit("/", 1)[-1]
+    client.post(f"/cases/{case_id}/process")
+    with db.session_scope() as session:
+        member = session.scalars(select(Member).where(Member.case_id == case_id)).one()
+        member.first_name, member.last_name = "Demo", "Person"
+        member.date_of_birth, member.gender = "1990-01-01", "Female"
+        member.marital_status, member.nationality = "Single", "India"
+        member.relation, member.category = "Principal", "CAT B"
+        member.effective_date = date.today().isoformat()
+        member.emirates_id = "784-1990-1234567-1"
+        member.provenance = {}
+        member_id = member.id
+    client.post(f"/cases/{case_id}/members/{member_id}/approve")
+    return case_id
+
+
+@pytest.mark.parametrize(
+    "exception, expected",
+    [
+        ("StructuralDrift", "no longer matches the master"),
+        ("UnsupportedValue", "cannot express"),
+        ("UnknownField", "does not exist in it"),
+    ],
+)
+def test_every_export_refusal_is_explained_not_a_500(client, monkeypatch, exception, expected):
+    case_id = _approved_case(client)
+
+    from bms.outputs.mapping import UnsupportedValue
+    from bms.registry.generate import StructuralDrift, UnknownField
+
+    raised = {"StructuralDrift": StructuralDrift, "UnsupportedValue": UnsupportedValue,
+              "UnknownField": UnknownField}[exception]
+
+    def refuse(*args, **kwargs):
+        if exception == "StructuralDrift":
+            raise raised("nas.addition.aldar.v1", ["sheet order changed"])
+        raise raised("Parent")
+
+    monkeypatch.setattr("bms.web.app.pipeline.export_case", refuse)
+    response = client.post(f"/cases/{case_id}/export", data={"template_key": "nas.addition.aldar.v1"})
+
+    assert response.status_code == 200, "a refusal is shown on the case screen, not a 500"
+    assert expected in response.text
+    assert "Traceback" not in response.text
+
+
+def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkeypatch):
+    """A traceback in the page would disclose paths, versions and query text."""
+    import re
+
+    sign_in(client)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("database connection lost mid-query")
+
+    monkeypatch.setattr("bms.web.app.logbook.count", explode)
+    unhandled = BrowserClient(web_app.app, raise_server_exceptions=False)
+    unhandled.cookies = client.cookies
+    response = unhandled.get("/log")
+
+    assert response.status_code == 500
+    assert "database connection lost" not in response.text
+    assert "Traceback" not in response.text
+    assert "RuntimeError" not in response.text
+    assert re.search(r"<code>[0-9a-f]{12}</code>", response.text), "a reference to quote"
+
+
+# --------------------------------------------------- hardening and efficiency
+
+
+def test_repeated_wrong_passwords_lock_the_account_out(client):
+    """Unthrottled, the login form is two problems at once: an unlimited guessing
+    oracle, and a way for one unauthenticated client to burn the host's CPU --
+    every attempt costs 240,000 PBKDF2 rounds by design."""
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for _ in range(security.FAILURE_LIMIT):
+            refused = client.post("/login", data={"username": "tester", "password": "wrong"})
+            assert "Incorrect username or password" in refused.text
+
+        blocked = client.post("/login", data={"username": "tester", "password": "wrong"})
+        assert "Too many failed sign-in attempts" in blocked.text
+
+        # The correct password is refused too while the lockout stands, so the
+        # throttle cannot be stepped around by guessing right on the next try.
+        assert client.post(
+            "/login", data={"username": "tester", "password": "secret"}
+        ).status_code == 200
+    finally:
+        security.reset_throttle()
+
+
+def test_a_successful_sign_in_clears_the_failure_count(client):
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for _ in range(security.FAILURE_LIMIT - 1):
+            client.post("/login", data={"username": "tester", "password": "wrong"})
+        assert client.post(
+            "/login", data={"username": "tester", "password": "secret"}
+        ).status_code == 303
+        assert security.locked_out("user:tester") == 0
+    finally:
+        security.reset_throttle()
+
+
+def test_a_disabled_account_fails_exactly_like_a_wrong_password(client):
+    """So the form cannot be used to discover which accounts exist or are live."""
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        with db.session_scope() as session:
+            session.scalar(select(User).where(User.username == "tester")).active = False
+        refused = client.post("/login", data={"username": "tester", "password": "secret"})
+        assert refused.status_code == 200
+        assert "Incorrect username or password" in refused.text
+        assert client.cookies.get("bms_session") is None
+    finally:
+        security.reset_throttle()
+
+
+def test_every_response_carries_the_browser_defences(client):
+    """The platform serves member identity data: a page of it must not be
+    frameable, sniffable, or leak its case and member ids through Referer."""
+    for path in ("/login", "/"):
+        headers = client.get(path).headers
+        assert headers["X-Frame-Options"] == "DENY"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert headers["Referrer-Policy"] == "no-referrer"
+        policy = headers["Content-Security-Policy"]
+        assert "default-src 'self'" in policy
+        assert "frame-ancestors 'none'" in policy
+        assert "object-src 'none'" in policy
+
+
+def test_hsts_is_only_sent_when_the_cookie_is_secure(client):
+    """Promising HTTPS-only over a plain-HTTP deployment would lock users out."""
+    assert "Strict-Transport-Security" not in client.get("/login").headers
+
+
+def test_an_oversized_upload_is_refused_without_being_held_in_memory(client, monkeypatch):
+    """The limit was only applied after `await read()` had pulled the whole body
+    into RAM, so it could not prevent what it existed to prevent."""
+    sign_in(client)
+    created = client.post(
+        "/cases",
+        data={"client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition",
+              "bms_comments": ""},
+    )
+    case_id = created.headers["location"].rsplit("/", 1)[-1]
+
+    import dataclasses
+
+    # Settings is frozen by design, so swap the object rather than mutate it.
+    monkeypatch.setattr(
+        web_app, "settings", dataclasses.replace(web_app.settings, max_upload_bytes=4096)
+    )
+    huge = b"x" * (256 * 1024)
+    response = client.post(
+        f"/cases/{case_id}/upload", files={"files": ("huge.txt", io.BytesIO(huge), "text/plain")}
+    )
+    assert response.status_code == 303
+
+    from bms.models import CaseFile
+
+    with db.session_scope() as session:
+        stored = session.scalars(select(CaseFile).where(CaseFile.case_id == case_id)).all()
+    assert stored == [], "an oversized file must never reach storage"
+
+
+def test_reading_stops_at_the_limit_rather_than_buffering_everything():
+    """Peak memory is bounded by the limit, whatever the client sends."""
+    import asyncio
+
+    class Endless:
+        """A body that never ends -- the shape of the attack."""
+
+        def __init__(self):
+            self.served = 0
+
+        async def read(self, size: int = -1) -> bytes:
+            self.served += size
+            return b"y" * size
+
+    body = Endless()
+    result = asyncio.run(web_app._read_bounded(body, 1024 * 1024))
+    assert result is None
+    # Bounded to roughly the limit plus the one chunk that crossed it.
+    assert body.served <= 3 * 1024 * 1024
+
+
+# ------------------------------------------------------------------ CSRF
+#
+# SameSite=Lax already blocks the classic cross-site form POST. These cover the
+# rest: a same-site attack, a browser that does not honour SameSite, and any
+# future deployment reachable from outside the BMS network.
+
+
+def test_a_state_changing_post_without_a_token_is_rejected(client):
+    sign_in(client)
+    refused = client.post(
+        "/cases",
+        data={"client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition"},
+        csrf=False,
+    )
+    assert refused.status_code == 403
+    assert "not submitted from a current session" in refused.text
+
+    with db.session_scope() as session:
+        assert session.scalars(select(Case)).all() == [], "nothing may be created"
+
+
+def test_a_token_from_another_session_is_rejected(client):
+    """The token is derived from the session, so one user's cannot act for another."""
+    from bms.web.security import CSRF_FIELD, csrf_token
+
+    sign_in(client)
+    foreign = csrf_token("a-different-sessions-cookie-value")
+    refused = client.post(
+        "/cases",
+        data={
+            "client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition",
+            CSRF_FIELD: foreign,
+        },
+        csrf=False,
+    )
+    assert refused.status_code == 403
+
+
+def test_signing_out_is_protected_too(client):
+    """Otherwise an attacker can sign a user out at will -- minor, but free to stop."""
+    sign_in(client)
+    assert client.post("/logout", csrf=False).status_code == 403
+    assert client.post("/logout").status_code == 303
+
+
+def test_login_is_exempt_because_it_has_no_session_yet(client):
+    """The only exemption, and it must keep working."""
+    assert client.post(
+        "/login", data={"username": "tester", "password": "secret"}
+    ).status_code == 303
+
+
+def test_every_rendered_form_carries_a_token(client):
+    """A form added later without one would fail at 403 in front of a user.
+
+    Checked against the templates rather than a rendered page, so forms on
+    screens this test never visits are covered too.
+    """
+    import re
+    from pathlib import Path
+
+    templates = Path(__file__).resolve().parents[1] / "bms" / "web" / "templates"
+    for path in sorted(templates.glob("*.html")):
+        if path.name == "login.html":
+            continue  # exempt: no session exists yet
+        body = path.read_text()
+        forms = body.count('method="post"')
+        tokens = len(re.findall(r'name="\{\{ csrf_field \}\}"', body))
+        assert forms == tokens, f"{path.name}: {forms} POST form(s), {tokens} token(s)"
+
+
+def test_the_token_is_not_guessable_from_the_session_id(client):
+    """It is an HMAC under the signing key, not a transform of the cookie."""
+    from bms.web.security import csrf_token
+
+    cookie = "some-session-value"
+    token = csrf_token(cookie)
+    assert cookie not in token
+    assert len(token) == 64
+    assert csrf_token(cookie + "x") != token

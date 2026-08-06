@@ -22,6 +22,7 @@
   <h2>BMS Comments</h2>
   <p class="muted">The pasted client email body. Stored verbatim; it is the source for everything parsed below.</p>
   <form method="post" action="/cases/{{ case.id }}/comments">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <textarea name="bms_comments">{{ case.bms_comments or '' }}</textarea>
     <p><button type="submit" class="secondary">Save comments</button></p>
   </form>
@@ -30,6 +31,7 @@
 <div class="card">
   <h2>Documents</h2>
   <form method="post" action="/cases/{{ case.id }}/upload" enctype="multipart/form-data">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <input type="file" name="files" multiple>
     <button type="submit" class="secondary">Upload</button>
     <span class="muted">Individual files or ZIP folders. Nested ZIPs are expanded.</span>
@@ -49,6 +51,7 @@
       <td class="muted">{% if file.member_id %}{{ file.member_id[:8] }}{% else %}unassigned{% endif %}</td>
       <td>
         <form method="post" action="/cases/{{ case.id }}/files/{{ file.id }}/classify" class="inline">
+          <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
           <select name="document_type">
             {% for t in ['passport','emirates_id','visa','entry_permit','birth_certificate','insurance_card','coc','medical_declaration','photograph','cancellation','client_sheet','unknown'] %}
               <option value="{{ t }}" {% if file.document_type == t %}selected{% endif %}>{{ t }}</option>
@@ -70,6 +73,7 @@
 <div class="card">
   <h2>Processing</h2>
   <form method="post" action="/cases/{{ case.id }}/process">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <button type="submit">Run local processing</button>
     <span class="muted">Extracts text locally, classifies documents, identifies members and groups their documents. Re-running rebuilds members and discards manual corrections.</span>
   </form>
@@ -106,6 +110,7 @@
 <div class="card">
   <h2>Export</h2>
   <form method="post" action="/cases/{{ case.id }}/export">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <label for="template_key">Portal template</label>
     <select id="template_key" name="template_key" style="max-width:24rem">
       {% for key in templates_available %}
@@ -138,10 +143,12 @@
     <a class="btn secondary" href="/audit?case_id={{ case.id }}">View audit trail</a>
     {% if case.status == 'closed' %}
     <form method="post" action="/cases/{{ case.id }}/reopen" class="inline">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
       <button class="secondary">Reopen case</button>
     </form>
     {% else %}
     <form method="post" action="/cases/{{ case.id }}/close" class="inline">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
       <button class="secondary">Close case</button>
     </form>
     {% endif %}

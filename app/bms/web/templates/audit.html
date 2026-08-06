@@ -1,5 +1,19 @@
 {% extends "base.html" %}
-{% block title %}Audit{% endblock %}
+{% block title %}Audit{% if paging and paging.pages > 1 %}
+<p class="muted">
+  Showing {{ paging.first_row }}&ndash;{{ paging.last_row }} of {{ paging.total }}
+  &middot; page {{ paging.current }} of {{ paging.pages }}
+  {% if paging.has_previous %}
+    &middot; <a href="/audit?page=1{% if case_id %}&case_id={{ case_id }}{% endif %}">First</a>
+    &middot; <a href="/audit?page={{ paging.current - 1 }}{% if case_id %}&case_id={{ case_id }}{% endif %}">Previous</a>
+  {% endif %}
+  {% if paging.has_next %}
+    &middot; <a href="/audit?page={{ paging.current + 1 }}{% if case_id %}&case_id={{ case_id }}{% endif %}">Next</a>
+    &middot; <a href="/audit?page={{ paging.pages }}{% if case_id %}&case_id={{ case_id }}{% endif %}">Last</a>
+  {% endif %}
+</p>
+{% endif %}
+{% endblock %}
 {% block content %}
 <h1>Audit trail</h1>
 <p class="muted">Append-only. Records are never updated or deleted, including by the retention purge.</p>
@@ -19,4 +33,18 @@
   {% endfor %}
 </table>
 </div>
+{% if paging and paging.pages > 1 %}
+<p class="muted">
+  Showing {{ paging.first_row }}&ndash;{{ paging.last_row }} of {{ paging.total }}
+  &middot; page {{ paging.current }} of {{ paging.pages }}
+  {% if paging.has_previous %}
+    &middot; <a href="/audit?page=1{% if case_id %}&case_id={{ case_id }}{% endif %}">First</a>
+    &middot; <a href="/audit?page={{ paging.current - 1 }}{% if case_id %}&case_id={{ case_id }}{% endif %}">Previous</a>
+  {% endif %}
+  {% if paging.has_next %}
+    &middot; <a href="/audit?page={{ paging.current + 1 }}{% if case_id %}&case_id={{ case_id }}{% endif %}">Next</a>
+    &middot; <a href="/audit?page={{ paging.pages }}{% if case_id %}&case_id={{ case_id }}{% endif %}">Last</a>
+  {% endif %}
+</p>
+{% endif %}
 {% endblock %}

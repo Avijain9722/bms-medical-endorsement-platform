@@ -240,7 +240,7 @@ cd app
 BMS_DATABASE_URL=postgresql+psycopg://localhost/bms_drill \
 BMS_DATA_ROOT=/tmp/drill/bms-endorsements \
 BMS_SECRET_KEY=drill-only \
-  uvicorn bms.web.app:app --port 8099
+  .venv/bin/python -m uvicorn bms.web.app:app --port 8099
 ```
 
 Then confirm, by hand:

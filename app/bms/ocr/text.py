@@ -18,6 +18,7 @@ because an engine was missing.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -112,7 +113,33 @@ class TesseractOcr:
     def available(self) -> bool:
         if not self.config.ocr_enabled:
             return False
-        return shutil.which(self.config.tesseract_cmd) is not None
+        command = self.config.tesseract_cmd
+        # shutil.which only searches PATH entries, so a bundled copy addressed by
+        # an absolute path has to be checked directly.
+        if os.path.isabs(command):
+            return os.path.isfile(command) and os.access(command, os.X_OK)
+        return shutil.which(command) is not None
+
+    def _environment(self) -> dict[str, str] | None:
+        """TESSDATA_PREFIX for a bundled Tesseract; nothing for a system one."""
+        tessdata = self.config.tessdata_dir
+        if tessdata is None:
+            return None
+        return {**os.environ, "TESSDATA_PREFIX": str(tessdata)}
+
+    def _tessdata_arguments(self) -> list[str]:
+        """`--tessdata-dir`, which means the same thing in every Tesseract.
+
+        TESSDATA_PREFIX alone is not portable: Tesseract 5 treats it as the
+        directory holding the language files, while Tesseract 4 -- still what
+        `apt-get install tesseract-ocr` gives on Debian 11 and Ubuntu 22.04 --
+        appends "tessdata/" to it and then fails to find
+        `<dir>/tessdata/eng.traineddata`. The command-line option is honoured
+        verbatim by both and takes precedence, so it is what actually makes a
+        bundled copy work across versions.
+        """
+        tessdata = self.config.tessdata_dir
+        return ["--tessdata-dir", str(tessdata)] if tessdata else []
 
     def supports(self, filename: str, data: bytes) -> bool:
         suffix = Path(filename).suffix.lower()
@@ -131,10 +158,12 @@ class TesseractOcr:
                         "stdout",
                         "-l",
                         self.config.ocr_languages,
+                        *self._tessdata_arguments(),
                     ],
                     capture_output=True,
                     timeout=180,
                     check=False,
+                    env=self._environment(),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 return None

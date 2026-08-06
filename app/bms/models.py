@@ -111,7 +111,7 @@ class User(Base):
     # case-processing capability, and it grants no override of a critical error.
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 # ---------------------------------------------------------- client master
@@ -132,7 +132,7 @@ class Client(Base):
     code: Mapped[str | None] = mapped_column(String(32))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     notes: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     sub_groups: Mapped[list["SubGroup"]] = relationship(
         back_populates="client", cascade="all, delete-orphan"
@@ -152,7 +152,7 @@ class SubGroup(Base):
     __table_args__ = (UniqueConstraint("client_id", "name", name="uq_sub_group_per_client"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     # Drives the deletion effective-date rule: Abu Dhabi uses the processing
     # date, Dubai uses cancellation + 30 days. Recording it here means the rule
@@ -174,7 +174,7 @@ class LegalEntity(Base):
     __table_args__ = (UniqueConstraint("client_id", "name", name="uq_entity_per_client"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(191), nullable=False)
     contract_name: Mapped[str | None] = mapped_column(String(191))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -188,8 +188,8 @@ class ClientPolicy(Base):
     __tablename__ = "client_policies"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False)
-    legal_entity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("legal_entities.id"))
+    client_id: Mapped[str] = mapped_column(String(36), ForeignKey("clients.id"), nullable=False, index=True)
+    legal_entity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("legal_entities.id"), index=True)
 
     insurer: Mapped[str] = mapped_column(String(128), nullable=False)
     network: Mapped[str | None] = mapped_column(String(128))
@@ -208,14 +208,14 @@ class Case(Base):
     __tablename__ = "cases"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    reference: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    reference: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
 
     # Denormalised names are kept alongside the foreign keys so a closed case
     # still reads correctly if a client is later renamed in the master.
-    client_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("clients.id"))
-    sub_group_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("sub_groups.id"))
-    legal_entity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("legal_entities.id"))
-    client_policy_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("client_policies.id"))
+    client_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("clients.id"), index=True)
+    sub_group_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("sub_groups.id"), index=True)
+    legal_entity_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("legal_entities.id"), index=True)
+    client_policy_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("client_policies.id"), index=True)
 
     client_name: Mapped[str] = mapped_column(String(128), nullable=False)
     sub_group: Mapped[str | None] = mapped_column(String(128))
@@ -238,9 +238,9 @@ class Case(Base):
     user_notes: Mapped[str | None] = mapped_column(Text)
 
     status: Mapped[str] = mapped_column(String(32), default=CaseStatus.DRAFT.value)
-    owner_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+    owner_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), index=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
@@ -265,12 +265,12 @@ class CaseFile(Base):
     __tablename__ = "case_files"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False)
+    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False, index=True)
 
     original_name: Mapped[str] = mapped_column(String(512), nullable=False)
     # Path inside the uploaded archive, when the file came from a ZIP.
     archive_path: Mapped[str | None] = mapped_column(String(1024))
-    parent_file_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("case_files.id"))
+    parent_file_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("case_files.id"), index=True)
 
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -289,8 +289,8 @@ class CaseFile(Base):
     text_source: Mapped[str | None] = mapped_column(String(32))
     notes: Mapped[str | None] = mapped_column(Text)
 
-    member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     case: Mapped[Case] = relationship(back_populates="files")
     member: Mapped["Member | None"] = relationship(back_populates="documents")
@@ -331,7 +331,7 @@ class Member(Base):
     __tablename__ = "members"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False)
+    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False, index=True)
     row_index: Mapped[int] = mapped_column(Integer, default=0)
 
     transaction_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -362,7 +362,7 @@ class Member(Base):
     deletion_reason: Mapped[str | None] = mapped_column(String(64))
     cancellation_date: Mapped[str | None] = mapped_column(String(32))
 
-    principal_member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"))
+    principal_member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"), index=True)
     principal_card_no: Mapped[str | None] = mapped_column(String(64))
 
     email: Mapped[str | None] = mapped_column(String(255))
@@ -377,7 +377,7 @@ class Member(Base):
     approved_by_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     case: Mapped[Case] = relationship(back_populates="members")
     documents: Mapped[list[CaseFile]] = relationship(back_populates="member")
@@ -397,8 +397,8 @@ class ReviewFlag(Base):
     __tablename__ = "review_flags"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False)
-    member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"))
+    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False, index=True)
+    member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"), index=True)
 
     code: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -410,7 +410,7 @@ class ReviewFlag(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolution_note: Mapped[str | None] = mapped_column(Text)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     case: Mapped[Case] = relationship(back_populates="flags")
     member: Mapped[Member | None] = relationship(back_populates="flags")
@@ -420,7 +420,7 @@ class Export(Base):
     __tablename__ = "exports"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False)
+    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False, index=True)
 
     kind: Mapped[str] = mapped_column(String(32), nullable=False)  # portal | log | zip
     template_key: Mapped[str | None] = mapped_column(String(64))
@@ -435,7 +435,7 @@ class Export(Base):
     recalc_detail: Mapped[str | None] = mapped_column(Text)
 
     created_by_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     case: Mapped[Case] = relationship(back_populates="exports")
 
@@ -450,22 +450,22 @@ class LogEntry(Base):
     __tablename__ = "log_entries"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False)
-    member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"))
+    case_id: Mapped[str] = mapped_column(String(36), ForeignKey("cases.id"), nullable=False, index=True)
+    member_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("members.id"), index=True)
 
     shared_by: Mapped[str | None] = mapped_column(String(64))
-    client_name: Mapped[str | None] = mapped_column(String(128))
+    client_name: Mapped[str | None] = mapped_column(String(128), index=True)
     sub_group: Mapped[str | None] = mapped_column(String(128))
-    insurer: Mapped[str | None] = mapped_column(String(128))
+    insurer: Mapped[str | None] = mapped_column(String(128), index=True)
     policy_no: Mapped[str | None] = mapped_column(String(64))
     beneficiary_name: Mapped[str | None] = mapped_column(String(191))
     relation: Mapped[str | None] = mapped_column(String(32))
     category: Mapped[str | None] = mapped_column(String(64))
     staff_id: Mapped[str | None] = mapped_column(String(64))
     emirates_id: Mapped[str | None] = mapped_column(String(32))
-    entry_type: Mapped[str | None] = mapped_column(String(48))
+    entry_type: Mapped[str | None] = mapped_column(String(48), index=True)
     effective_date: Mapped[str | None] = mapped_column(String(32))
-    status: Mapped[str | None] = mapped_column(String(48))
+    status: Mapped[str | None] = mapped_column(String(48), index=True)
     request_receive_date: Mapped[str | None] = mapped_column(String(32))
     remarks: Mapped[str | None] = mapped_column(Text)
     remarks2: Mapped[str | None] = mapped_column(Text)
@@ -478,7 +478,7 @@ class LogEntry(Base):
     saiba_voucher_no: Mapped[str | None] = mapped_column(String(64))
     bbm_invoice_date: Mapped[str | None] = mapped_column(String(32))
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

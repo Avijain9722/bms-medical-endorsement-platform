@@ -7,14 +7,16 @@ work survives a refresh, a logout, a restart and the end of the day.
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import pipeline
@@ -40,9 +42,26 @@ from ..models import (
     User,
 )
 from ..outputs import log as log_output
+from ..outputs.mapping import UnsupportedValue
+from ..registry.generate import StructuralDrift, UnknownField
 from ..outputs.nas import SUPPORTED_KEYS
 from ..storage import ExportStorage
-from .security import COOKIE_NAME, hash_password, issue_session, read_session, verify_password
+from .security import (
+    COOKIE_NAME,
+    CSRF_FIELD,
+    SESSION_MAX_AGE_SECONDS,
+    csrf_token,
+    csrf_valid,
+    hash_password,
+    issue_session,
+    locked_out,
+    read_session,
+    record_failure,
+    record_success,
+    verify_password,
+)
+
+logger = logging.getLogger("bms.web")
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -61,12 +80,78 @@ async def lifespan(_: FastAPI):
             purge_task.cancel()
 
 
+# Only /login is exempt, and only because no session exists yet to derive a token
+# from. Everything else that changes state -- including /logout, so an attacker
+# cannot sign someone out -- is checked.
+CSRF_EXEMPT_PATHS = frozenset({"/login"})
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CSRF_REJECTED = (
+    "This form was not submitted from a current session, so nothing was changed. "
+    "If you were signed out, sign in again and retry. If you were not, tell your "
+    "administrator: something else tried to act as you."
+)
+
+
+async def _csrf_guard(request: Request) -> None:
+    """Reject a state-changing request that does not carry this session's token.
+
+    A dependency rather than middleware, deliberately. Middleware would have to
+    call `request.form()` to read the token, and that consumes the request body
+    before the route handler can parse it -- every form POST would fail with a
+    422. FastAPI resolves dependencies against the *same* Request the handler
+    uses, and Request.form() caches, so reading it here is free.
+
+    Registered globally on the application, so a route added later is protected
+    by default rather than by remembering to opt in.
+    """
+    if request.method not in UNSAFE_METHODS or request.url.path in CSRF_EXEMPT_PATHS:
+        return
+    form = await request.form()
+    submitted = form.get(CSRF_FIELD)
+    if not csrf_valid(
+        request.cookies.get(COOKIE_NAME), submitted if isinstance(submitted, str) else None
+    ):
+        logger.warning("CSRF check failed on %s %s", request.method, request.url.path)
+        raise HTTPException(status_code=403, detail=CSRF_REJECTED)
+
+
 app = FastAPI(
     title="BMS Medical Endorsement Platform",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
+    # Applied to every route, so a new one is protected by default.
+    dependencies=[Depends(_csrf_guard)],
 )
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Browser-side defences, on every response.
+
+    The platform serves member identity data, so a page of it must not be
+    frameable by another site, must not be sniffed into a different content type,
+    and must not leak its URL -- which contains case and member ids -- in a
+    Referer header. The CSP also enforces at the browser what the code already
+    guarantees: nothing loads from anywhere but this host.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'; object-src 'none'",
+    )
+    if settings.cookie_secure:
+        # Only meaningful over TLS, and actively harmful to send otherwise.
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
 
 
 def _ensure_seed_user() -> None:
@@ -131,8 +216,119 @@ async def _redirect_handler(request: Request, exc: HTTPException):
     return HTMLResponse(f"<h1>{exc.status_code}</h1><p>{exc.detail}</p>", status_code=exc.status_code)
 
 
+@app.exception_handler(Exception)
+async def _unexpected_handler(request: Request, exc: Exception):
+    """Anything not anticipated.
+
+    The traceback goes to the server log, where an administrator can read it; the
+    browser gets a reference to quote and nothing else. A stack trace rendered
+    into the page would disclose file paths, library versions and query
+    fragments to whoever triggered it.
+    """
+    import uuid
+
+    reference = uuid.uuid4().hex[:12]
+    logger.exception("unhandled error %s on %s %s", reference, request.method, request.url.path)
+    return HTMLResponse(
+        "<h1>Something went wrong</h1>"
+        "<p>The error has been recorded. Nothing was submitted to an insurer.</p>"
+        f"<p>Quote reference <code>{reference}</code> to your administrator, "
+        "who can find it in the server log.</p>"
+        '<p><a href="/">Back to cases</a></p>',
+        status_code=500,
+    )
+
+
+# Every way a generated file can be refused. All four mean the same thing to the
+# operator -- this must not be sent to the insurer -- so all four are shown on
+# the case screen rather than reaching the browser as an unexplained 500.
+EXPORT_REFUSALS = (
+    pipeline.ExportBlocked,
+    StructuralDrift,
+    UnknownField,
+    UnsupportedValue,
+)
+
+
+def _explain_refusal(error: Exception) -> str:
+    """Say what the refusal means and what to do about it.
+
+    The exception messages are precise but assume the reader knows the internals;
+    the Medical Team needs to know whose problem it is.
+    """
+    if isinstance(error, StructuralDrift):
+        return (
+            "Export blocked: the generated workbook no longer matches the master "
+            "template supplied by the insurer, so it must not be uploaded. This is "
+            "not a problem with the member data. Report it to your administrator, "
+            f"quoting: {error}"
+        )
+    if isinstance(error, UnsupportedValue):
+        return (
+            "Export blocked: this insurer's own dropdown cannot express one of the "
+            "values on this case, and the platform will not substitute a nearest "
+            f"match. {error}"
+        )
+    if isinstance(error, UnknownField):
+        return (
+            "Export blocked: this template is configured to write a field that does "
+            f"not exist in it. Report it to your administrator, quoting: {error}"
+        )
+    return str(error)
+
+
 def render(request: Request, name: str, **context) -> HTMLResponse:
+    # Supplied to every template so no page has to remember to ask for it.
+    context.setdefault("csrf_field", CSRF_FIELD)
+    context.setdefault("csrf_token", csrf_token(request.cookies.get(COOKIE_NAME)))
     return templates.TemplateResponse(request, name, context)
+
+
+# How many rows any list screen puts on one page. The operational log grows
+# without bound, so every list is paged rather than rendered whole: a page the
+# browser has to lay out in full gets slower every month until it is unusable.
+PAGE_SIZE = 50
+
+
+@dataclass(frozen=True)
+class Paging:
+    """Bounds for one page of a list, and the links either side of it."""
+
+    total: int
+    page: int
+    size: int = PAGE_SIZE
+
+    def __post_init__(self) -> None:
+        # A hand-typed ?page=0 or ?page=-5 must not become a negative OFFSET.
+        object.__setattr__(self, "page", max(1, self.page))
+
+    @property
+    def pages(self) -> int:
+        return max(1, -(-self.total // self.size))
+
+    @property
+    def current(self) -> int:
+        return min(self.page, self.pages)
+
+    @property
+    def offset(self) -> int:
+        return (self.current - 1) * self.size
+
+    @property
+    def first_row(self) -> int:
+        return 0 if self.total == 0 else self.offset + 1
+
+    @property
+    def last_row(self) -> int:
+        return min(self.offset + self.size, self.total)
+
+    @property
+    def has_previous(self) -> bool:
+        return self.current > 1
+
+    @property
+    def has_next(self) -> bool:
+        return self.current < self.pages
 
 
 def _load_case(session: Session, case_id: str) -> Case:
@@ -164,17 +360,46 @@ def login(
     password: str = Form(...),
     session: Session = Depends(get_session),
 ):
+    # Throttle on the username and on the caller's address: the first stops one
+    # account being ground down, the second stops one client working through many
+    # accounts. Checked BEFORE hashing, so a locked-out caller cannot keep
+    # spending 240,000 PBKDF2 rounds of server CPU per attempt.
+    client_key = f"ip:{request.client.host if request.client else 'unknown'}"
+    user_key = f"user:{username.strip().lower()}"
+    for key in (user_key, client_key):
+        remaining = locked_out(key)
+        if remaining:
+            logger.warning("login refused, throttled: %s", key)
+            return render(
+                request,
+                "login.html",
+                error=(
+                    "Too many failed sign-in attempts. Try again in "
+                    f"{max(1, remaining // 60)} minute(s), or ask an administrator "
+                    "to reset your password."
+                ),
+            )
+
     user = session.scalar(select(User).where(User.username == username))
-    if user is None or not verify_password(password, user.password_hash):
+    if user is None or not verify_password(password, user.password_hash) or not user.active:
+        # A disabled account fails identically to a wrong password, so the form
+        # cannot be used to discover which accounts exist or are still enabled.
+        for key in (user_key, client_key):
+            record_failure(key)
         return render(request, "login.html", error="Incorrect username or password.")
+
+    for key in (user_key, client_key):
+        record_success(key)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         COOKIE_NAME,
         issue_session(user.id),
         httponly=True,
         samesite="lax",
-        # The prototype is served inside the BMS network; set secure=True behind TLS.
-        secure=False,
+        # Set BMS_COOKIE_SECURE=true behind TLS. This used to be hard-coded False,
+        # so enabling it meant editing source on the production host.
+        secure=settings.cookie_secure,
+        max_age=SESSION_MAX_AGE_SECONDS,
     )
     return response
 
@@ -192,11 +417,21 @@ def logout():
 @app.get("/", response_class=HTMLResponse)
 def case_list(
     request: Request,
+    page: int = 1,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    cases = list(session.scalars(select(Case).order_by(Case.created_at.desc()).limit(200)))
-    return render(request, "cases.html", cases=cases, user=user)
+    total = int(session.scalar(select(func.count()).select_from(Case)) or 0)
+    paging = Paging(total=total, page=page, size=PAGE_SIZE)
+    cases = list(
+        session.scalars(
+            select(Case)
+            .order_by(Case.created_at.desc())
+            .offset(paging.offset)
+            .limit(paging.size)
+        )
+    )
+    return render(request, "cases.html", cases=cases, user=user, paging=paging)
 
 
 @app.get("/cases/new", response_class=HTMLResponse)
@@ -210,8 +445,25 @@ def new_case_form(
         "case_new.html",
         user=user,
         templates_available=SUPPORTED_KEYS,
-        clients=_master_snapshot(session),
+        clients=_client_index(session),
     )
+
+
+@app.get("/clients/{client_id}/options")
+def client_options(
+    client_id: str,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """The sub-groups, entities and policies of one company.
+
+    Signed-in only, like every other route: the client master is BMS commercial
+    data, not public reference.
+    """
+    client = session.get(Client, client_id)
+    if client is None or not client.active:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return _client_options(client)
 
 
 @app.post("/cases")
@@ -360,13 +612,41 @@ async def upload(
 ):
     case = _load_case(session, case_id)
     for upload_file in files:
-        data = await upload_file.read()
+        data = await _read_bounded(upload_file, settings.max_upload_bytes)
+        if data is None:
+            # Over the limit. add_upload records the same refusal for a file that
+            # arrives whole, so the operator sees one consistent message.
+            pipeline.record_oversize_upload(
+                session, case, upload_file.filename or "upload", actor=user.username
+            )
+            continue
         if not data:
             continue
         pipeline.add_upload(
             session, case, upload_file.filename or "upload", data, actor=user.username
         )
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
+
+
+async def _read_bounded(upload_file: UploadFile, limit: int) -> bytes | None:
+    """Read at most `limit` bytes, or give up.
+
+    `await upload_file.read()` pulls the whole body into memory and the size was
+    only checked afterwards, so the limit could not prevent what it existed to
+    prevent: a 10 GB upload was fully resident before anything rejected it. This
+    stops at the first chunk that crosses the limit, so peak memory is bounded by
+    the limit itself no matter what is sent.
+
+    Returns None when the file is too large.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await upload_file.read(1024 * 1024):
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @app.post("/cases/{case_id}/process")
@@ -524,9 +804,12 @@ def export(
     case = _load_case(session, case_id)
     try:
         pipeline.export_case(session, case, template_key=template_key, actor=user.username)
-    except (pipeline.ExportBlocked, Exception) as error:  # noqa: BLE001 - surfaced to the user
-        if not isinstance(error, pipeline.ExportBlocked):
-            raise
+    except EXPORT_REFUSALS as error:
+        # Four different refusals, all of which mean "this file must not be sent
+        # to the insurer", and all of which the operator has to be able to act
+        # on. Only ExportBlocked was handled before; the rest reached the browser
+        # as an unexplained 500 -- worst of all StructuralDrift, which is the
+        # check that stops a structurally damaged workbook being uploaded.
         members = list(
             session.scalars(select(Member).where(Member.case_id == case.id).order_by(Member.row_index))
         )
@@ -546,7 +829,7 @@ def export(
             user=user,
             templates_available=SUPPORTED_KEYS,
             severity=Severity,
-            error=str(error),
+            error=_explain_refusal(error),
         )
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
@@ -596,14 +879,22 @@ def close(
 def audit_log(
     request: Request,
     case_id: str | None = None,
+    page: int = 1,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    query = select(AuditEvent).order_by(AuditEvent.at.desc()).limit(500)
+    counter = select(func.count()).select_from(AuditEvent)
+    query = select(AuditEvent).order_by(AuditEvent.at.desc())
     if case_id:
         query = query.where(AuditEvent.case_id == case_id)
-    events = list(session.scalars(query))
-    return render(request, "audit.html", events=events, user=user, case_id=case_id)
+        counter = counter.where(AuditEvent.case_id == case_id)
+
+    # The audit trail is append-only and never purged, so it only ever grows.
+    paging = Paging(total=int(session.scalar(counter) or 0), page=page, size=PAGE_SIZE)
+    events = list(session.scalars(query.offset(paging.offset).limit(paging.size)))
+    return render(
+        request, "audit.html", events=events, user=user, case_id=case_id, paging=paging
+    )
 
 
 @app.get("/health")
@@ -635,11 +926,14 @@ def health():
 # ------------------------------------------------------------ administration
 
 
-def _master_snapshot(session: Session) -> list[dict]:
-    """The client master, shaped for the case form's dependent dropdowns."""
-    snapshot = []
-    for client in master.active_clients(session):
-        snapshot.append(
+def _client_options(client) -> dict:
+    """One company's sub-groups, entities and policies, for the case form.
+
+    Fetched for the selected company only. The whole master used to be embedded
+    in the page -- 707 KB of JSON at 500 companies, on every visit, nearly all of
+    it for companies the operator was not choosing.
+    """
+    return (
             {
                 "id": client.id,
                 "name": client.name,
@@ -670,8 +964,15 @@ def _master_snapshot(session: Session) -> list[dict]:
                     if p.active
                 ],
             }
-        )
-    return snapshot
+    )
+
+
+def _client_index(session: Session) -> list[dict]:
+    """Just enough to populate the company dropdown: id, name, code."""
+    return [
+        {"id": c.id, "name": c.name, "code": c.code}
+        for c in master.active_clients(session)
+    ]
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -941,6 +1242,7 @@ def log_screen(
     insurer: str | None = None,
     status: str | None = None,
     entry_type: str | None = None,
+    page: int = 1,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
@@ -952,7 +1254,12 @@ def log_screen(
         status=status or None,
         entry_type=entry_type or None,
     )
-    entries = logbook.query(session, criteria, limit=1000)
+    # One page at a time. The log grows without bound -- it is the permanent
+    # operational record -- so rendering every matching row would make the screen
+    # heavier every month until it stopped being usable.
+    total = logbook.count(session, criteria)
+    paging = Paging(total=total, page=page, size=PAGE_SIZE)
+    entries = logbook.query(session, criteria, limit=paging.size, offset=paging.offset)
     cases = {
         case.id: case
         for case in session.scalars(select(Case).where(Case.id.in_({e.case_id for e in entries})))
@@ -965,6 +1272,7 @@ def log_screen(
         entries=entries,
         cases=cases,
         criteria=criteria,
+        paging=paging,
         filters={
             "date_from": date_from or "",
             "date_to": date_to or "",
@@ -1003,6 +1311,33 @@ def log_export(
     download = logbook.export_range(session, criteria, actor=user.username, config=settings)
     path = ExportStorage(settings).absolute(download.relative_path)
     return FileResponse(path, filename=download.filename)
+
+
+@app.get("/log/{entry_id}", response_class=HTMLResponse)
+def log_entry_screen(
+    entry_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """One log row, with the workflow actions that write its blank columns.
+
+    These forms used to be rendered inside every row of the list. Five forms per
+    row meant the list carried thousands of controls the browser had to lay out
+    whether or not anyone touched them; on demand, it carries none.
+    """
+    entry = session.get(LogEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+    return render(
+        request,
+        "log_entry.html",
+        user=user,
+        entry=entry,
+        case=session.get(Case, entry.case_id),
+        statuses=logbook.LOG_STATUSES,
+        events=log_output.RECORDABLE_EVENTS,
+    )
 
 
 @app.post("/log/{entry_id}/event")
