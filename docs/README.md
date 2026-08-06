@@ -10,6 +10,7 @@
 | [TEST_RESULTS.md](TEST_RESULTS.md) | Everyone | You want to know what is proven and what is not |
 | [CI_PIPELINE.md](CI_PIPELINE.md) | Maintainers | Changing the workflows, or reading a failed run |
 | [OFFLINE_INSTALL.md](OFFLINE_INSTALL.md) | Installers | The BMS server has no internet access |
+| [BUNDLING_TESSERACT.md](BUNDLING_TESSERACT.md) | Installers | You cannot install OCR into the operating system |
 | [`../deploy/`](../deploy) | Installers | Scripted install for Linux and Windows |
 
 ## The short version
@@ -29,7 +30,7 @@ been given, and does not let anyone override a critical error.
 - Nine registered templates: NAS addition (ALDAR, IFFCO, HR), NAS deletion,
   ADNIC enrolment and termination, Sukoon addition, Daman addition, and the
   approved `New Log Format -2026`.
-- **246 automated tests, 0 failures, 0 skipped** — see
+- **252 automated tests, 0 failures, 0 skipped** — see
   [TEST_RESULTS.md](TEST_RESULTS.md) for what that does and does not cover.
 - Two business rules still open with BMS: the Emirates ID check-digit algorithm,
   and the mapping from a client's deletion wording to the insurers' fixed lists.

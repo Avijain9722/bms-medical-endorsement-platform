@@ -56,7 +56,7 @@ bundle carries several copies of those and only those.
 
 Also included:
 
-- **pytest, httpx and openpyxl** — so you can run the full 246-test suite on the
+- **pytest, httpx and openpyxl** — so you can run the full 252-test suite on the
   BMS host itself, offline, rather than taking the delivered result on trust.
 - **pypdf** — reads the text layer of PDFs directly, which is exact and always
   preferable to OCR.

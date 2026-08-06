@@ -9,15 +9,42 @@ a code release.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Third-party binaries shipped inside the project rather than installed into the
+# operating system. A locked-down BMS host may not permit an installer to run,
+# so a copy that lives in the project folder and travels with it is often the
+# only way to get OCR at all.
+VENDOR_ROOT = Path(os.environ.get("BMS_VENDOR_ROOT", REPO_ROOT / "vendor")).resolve()
 
 
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     return default if raw is None else raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def bundled_tesseract() -> str | None:
+    """Path to a Tesseract shipped inside the project, if one is present.
+
+    Looked for at `vendor/tesseract/`. Returns None when nothing is bundled, so
+    the caller falls back to whatever is on PATH.
+    """
+    for name in ("tesseract.exe", "tesseract"):
+        candidate = VENDOR_ROOT / "tesseract" / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _resolve_tesseract() -> str:
+    """An explicit setting always wins, then a bundled copy, then PATH."""
+    explicit = os.environ.get("BMS_TESSERACT_CMD")
+    if explicit:
+        return explicit
+    return bundled_tesseract() or "tesseract"
 
 
 @dataclass(frozen=True)
@@ -54,8 +81,25 @@ class Settings:
 
     # OCR must run locally. No document may be sent to an external service.
     ocr_enabled: bool = _bool("BMS_OCR_ENABLED", True)
-    tesseract_cmd: str = os.environ.get("BMS_TESSERACT_CMD", "tesseract")
+    # A copy under vendor/tesseract/ is picked up automatically; BMS_TESSERACT_CMD
+    # overrides it. See `bundled_tesseract`.
+    tesseract_cmd: str = field(default_factory=_resolve_tesseract)
     ocr_languages: str = os.environ.get("BMS_OCR_LANGUAGES", "eng+ara")
+
+    @property
+    def tessdata_dir(self) -> Path | None:
+        """The language files that belong to `tesseract_cmd`, if they travel with it.
+
+        A portable Tesseract keeps `tessdata/` beside the executable and cannot
+        find it without TESSDATA_PREFIX -- the failure is an unhelpful "Error
+        opening data file", so this is what makes a bundled copy actually work.
+        A system install needs nothing: it knows its own prefix.
+        """
+        binary = Path(self.tesseract_cmd)
+        if not binary.is_absolute():
+            return None
+        candidate = binary.resolve().parent / "tessdata"
+        return candidate if candidate.is_dir() else None
 
     @property
     def storage_root(self) -> Path:

@@ -17,3 +17,7 @@ var/
 # Offline install bundle: ~55MB of third-party wheels, rebuilt on demand.
 # Shipped inside the release package, never committed.
 deploy/wheelhouse/
+
+# Bundled third-party binaries (Tesseract). 100-200MB, platform-specific, and
+# rebuilt by deploy/bundle-tesseract.*. Travels by copying the folder.
+vendor/

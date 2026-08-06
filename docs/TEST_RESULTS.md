@@ -3,7 +3,7 @@
 The recorded run of the automated suite for the delivered build.
 
 ```
-246 tests · 0 failures · 0 errors · 0 skipped · 152.72s
+252 tests · 0 failures · 0 errors · 0 skipped · 140.5s
 ```
 
 Reproduce it with:
@@ -26,14 +26,28 @@ python3 -m pytest tests -q
 | Platform | Linux x86-64, glibc 2.39 |
 | Database | SQLite (per-test temporary files) |
 | Key packages | FastAPI 0.141.1 · Starlette 1.4.0 · SQLAlchemy 2.0.51 · Alembic 1.19.0 · Pydantic 2.13.4 · Jinja2 3.1.6 · pytest 9.1.1 |
-| Tesseract | **not installed** — deliberate, see §4 |
+| Tesseract | 5.3.4, bundled at `vendor/tesseract/` — see §4 |
 | ClamAV | **not installed** — deliberate, see §4 |
 | Microsoft Excel | **not available** — Linux host, see §4 |
-| Result | **246 passed, 0 failed, 0 errored, 0 skipped** |
+| Result | **252 passed, 0 failed, 0 errored, 0 skipped** |
 
 Zero skips is the number to look at. Nothing was quietly stepped over because
 the host lacked something; where a capability is missing, the test asserts the
 *degradation* instead of being skipped.
+
+### OCR was exercised for the first time
+
+Earlier runs had no OCR engine on the host, so only the *absence* path was
+covered. This run bundled Tesseract 5.3.4 into `vendor/tesseract/` and confirmed:
+
+- the platform locates a bundled copy with no configuration at all;
+- it sets `TESSDATA_PREFIX` so the bundled language data is found;
+- a generated test image was read through `TextPipeline` and returned text with
+  `source: tesseract`;
+- `eng`, `ara` and `osd` language data all load.
+
+Six tests were added to cover the resolution order, the language-file handling
+and the absolute-path detection, taking the suite from 246 to 252.
 
 ### Independently reproduced in CI
 
@@ -45,7 +59,7 @@ ClamAV and no Excel:
 | --- | --- |
 | Run | [`31029628219`](https://github.com/Avijain9722/bms-medical-endorsement-platform/actions/runs/31029628219) |
 | Source integrity job | **success** — supplied workbooks match `SHA256SUMS.txt` |
-| Template preservation job | **success** — 246 tests, 126s |
+| Template preservation job | **success** — 246 tests, 126s (before the OCR bundling work) |
 | Artifact | `test-results.xml` attached to the run |
 
 Both jobs also passed on the `push` event for the same commit. Every commit on
@@ -63,12 +77,12 @@ development container.
 | 28 | 91.5s | `test_logbook_and_package.py` | The operational log workflow — statuses, date-range export, post-submission events — and supporting-document ZIP packaging with its manifest |
 | 27 | 11.8s | `test_pipeline.py` | End-to-end case processing against a real database and the real workbooks |
 | 27 | <0.1s | `test_matching_and_rules.py` | Member grouping, principal/dependant linkage and every validation rule |
-| 21 | <0.1s | `test_ocr.py` | Deterministic field extraction and document classification |
+| 27 | <0.1s | `test_ocr.py` | Deterministic field extraction, document classification, and locating a Tesseract bundled inside the project |
 | 17 | 5.0s | `test_master_and_admin.py` | Client master, administration and the login mechanism |
 | 15 | 6.1s | `test_infrastructure.py` | Virus scanning, Excel recalculation, the purge scheduler and Alembic migrations |
 | 14 | <0.1s | `test_intake.py` | Pasted-instruction parsing and archive expansion |
 | 10 | 3.0s | `test_web.py` | The web tier through the real ASGI app — routing, templates, session cookie |
-| **246** | **152.7s** | | |
+| **252** | **140.5s** | | |
 
 `test_logbook_and_package.py` and `test_template_preservation.py` account for
 four-fifths of the runtime because they open, populate and re-fingerprint real
@@ -156,7 +170,7 @@ Stated plainly, because a green suite is not the same as a proven deployment.
 
 | Not exercised | Why | What is proven instead |
 | --- | --- | --- |
-| **OCR accuracy on real scans** | No Tesseract on this host, and no real client documents to test against — only synthetic data was used | That the pipeline degrades honestly: scans are marked `ocr_unavailable` and raised for manual entry, never guessed at. The extraction rules themselves are tested against supplied text, including MRZ parsing with correct ICAO 9303 check digits |
+| **OCR accuracy on real scans** | No real client documents to test against — only synthetic data was used | Tesseract 5.3.4 is now present and was exercised end to end: a generated test image was read through the full pipeline. What remains unproven is *accuracy against genuine scans*, not whether OCR runs. The pipeline also still degrades honestly when no engine is installed — scans are marked `ocr_unavailable` and raised for manual entry, never guessed at |
 | **Excel recalculation** | Requires a Windows host with Excel; this run was on Linux | That the absence is detected and reported with a reason, that exports record `recalculated: false`, and that the files are written with formulas intact so Excel calculates on open |
 | **Virus scanning against a real signature** | No ClamAV on this host | That an infected verdict blocks the upload and never reaches storage (tested with an injected verdict), and that an absent scanner reports `unavailable` — never `clean` — and raises a warning flag |
 | **A live insurer portal upload** | Requires the insurer portals and real credentials | That the generated workbook is structurally identical to the master the portal expects. Manual acceptance against the live portals remains a BMS step |

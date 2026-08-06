@@ -18,6 +18,7 @@ because an engine was missing.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -112,7 +113,19 @@ class TesseractOcr:
     def available(self) -> bool:
         if not self.config.ocr_enabled:
             return False
-        return shutil.which(self.config.tesseract_cmd) is not None
+        command = self.config.tesseract_cmd
+        # shutil.which only searches PATH entries, so a bundled copy addressed by
+        # an absolute path has to be checked directly.
+        if os.path.isabs(command):
+            return os.path.isfile(command) and os.access(command, os.X_OK)
+        return shutil.which(command) is not None
+
+    def _environment(self) -> dict[str, str] | None:
+        """TESSDATA_PREFIX for a bundled Tesseract; nothing for a system one."""
+        tessdata = self.config.tessdata_dir
+        if tessdata is None:
+            return None
+        return {**os.environ, "TESSDATA_PREFIX": str(tessdata)}
 
     def supports(self, filename: str, data: bytes) -> bool:
         suffix = Path(filename).suffix.lower()
@@ -135,6 +148,7 @@ class TesseractOcr:
                     capture_output=True,
                     timeout=180,
                     check=False,
+                    env=self._environment(),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 return None

@@ -174,3 +174,89 @@ def test_text_pipeline_returns_none_when_nothing_can_read_the_file():
     """The honest answer when no engine is installed -- never a guess."""
     pipeline = TextPipeline([PlainTextFile()])
     assert pipeline.extract("scan.jpg", b"\xff\xd8\xff\xe0binary") is None
+
+
+# ------------------------------------------------- Tesseract bundled in-project
+
+
+def test_a_bundled_tesseract_is_found_without_any_configuration(tmp_path, monkeypatch):
+    """A locked-down host may not permit an installer, so a copy that lives in
+    the project folder has to be picked up on its own."""
+    from bms import config as config_module
+
+    vendor = tmp_path / "vendor"
+    (vendor / "tesseract").mkdir(parents=True)
+    binary = vendor / "tesseract" / "tesseract"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    monkeypatch.setattr(config_module, "VENDOR_ROOT", vendor)
+    monkeypatch.delenv("BMS_TESSERACT_CMD", raising=False)
+    assert config_module.bundled_tesseract() == str(binary)
+    assert config_module._resolve_tesseract() == str(binary)
+
+
+def test_an_explicit_setting_wins_over_a_bundled_copy(tmp_path, monkeypatch):
+    from bms import config as config_module
+
+    vendor = tmp_path / "vendor"
+    (vendor / "tesseract").mkdir(parents=True)
+    binary = vendor / "tesseract" / "tesseract"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    monkeypatch.setattr(config_module, "VENDOR_ROOT", vendor)
+    monkeypatch.setenv("BMS_TESSERACT_CMD", "/opt/custom/tesseract")
+    assert config_module._resolve_tesseract() == "/opt/custom/tesseract"
+
+
+def test_nothing_bundled_falls_back_to_the_system_tesseract(tmp_path, monkeypatch):
+    from bms import config as config_module
+
+    monkeypatch.setattr(config_module, "VENDOR_ROOT", tmp_path / "empty")
+    monkeypatch.delenv("BMS_TESSERACT_CMD", raising=False)
+    assert config_module.bundled_tesseract() is None
+    assert config_module._resolve_tesseract() == "tesseract"
+
+
+def test_a_bundled_copy_gets_its_own_language_files(tmp_path):
+    """Without TESSDATA_PREFIX a portable Tesseract fails with an unhelpful
+    'Error opening data file', so this is what makes bundling actually work."""
+    from bms.config import Settings
+    from bms.ocr.text import TesseractOcr
+
+    root = tmp_path / "tesseract"
+    (root / "tessdata").mkdir(parents=True)
+    binary = root / "tesseract"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    config = Settings(tesseract_cmd=str(binary))
+    assert config.tessdata_dir == root / "tessdata"
+
+    environment = TesseractOcr(config)._environment()
+    assert environment is not None
+    assert environment["TESSDATA_PREFIX"] == str(root / "tessdata")
+
+
+def test_a_system_tesseract_is_left_to_find_its_own_data():
+    """Overriding TESSDATA_PREFIX for a system install would break it."""
+    from bms.config import Settings
+    from bms.ocr.text import TesseractOcr
+
+    config = Settings(tesseract_cmd="tesseract")
+    assert config.tessdata_dir is None
+    assert TesseractOcr(config)._environment() is None
+
+
+def test_an_absolute_path_is_detected_even_though_it_is_not_on_PATH(tmp_path):
+    """shutil.which only searches PATH, so a bundled copy needs a direct check."""
+    from bms.config import Settings
+    from bms.ocr.text import TesseractOcr
+
+    binary = tmp_path / "tesseract"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    assert TesseractOcr(Settings(tesseract_cmd=str(binary))).available()
+    assert not TesseractOcr(Settings(tesseract_cmd=str(tmp_path / "absent"))).available()

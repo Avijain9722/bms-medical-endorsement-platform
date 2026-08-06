@@ -61,7 +61,7 @@ By instruction and by design:
 
 app/                       the application
   bms/                     pipeline, ocr, matching, validation, outputs, ooxml, web
-  tests/                   246 automated tests
+  tests/                   252 automated tests
   migrations/              Alembic
 deploy/                    install scripts and service units
 docs/                      the documentation set
@@ -74,7 +74,7 @@ never writes to it.
 ## Verify
 
 ```bash
-cd app && python3 -m pytest tests -q     # 246 tests
+cd app && python3 -m pytest tests -q     # 252 tests
 cd app && python3 tools/verify_sources.py   # supplied workbooks unaltered
 curl -s http://127.0.0.1:8000/health     # what this host can and cannot do
 ```
