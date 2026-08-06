@@ -260,3 +260,44 @@ def test_an_absolute_path_is_detected_even_though_it_is_not_on_PATH(tmp_path):
 
     assert TesseractOcr(Settings(tesseract_cmd=str(binary))).available()
     assert not TesseractOcr(Settings(tesseract_cmd=str(tmp_path / "absent"))).available()
+
+
+def test_the_shipped_env_example_does_not_disable_bundling():
+    """It set BMS_TESSERACT_CMD=tesseract, which is the highest-priority branch.
+
+    Both installers copy .env.example to app/.env, start-linux.sh sources it and
+    the systemd unit loads it -- so every install produced by the project's own
+    installers silently ignored a bundled Tesseract, while the documentation
+    said bundling needed no configuration at all.
+    """
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[2] / "deploy" / ".env.example"
+    for line in example.read_text().splitlines():
+        stripped = line.strip()
+        assert not stripped.startswith("BMS_TESSERACT_CMD="), (
+            "an active BMS_TESSERACT_CMD overrides and disables vendor/tesseract/"
+        )
+
+
+def test_a_bundled_copy_is_told_where_its_languages_are_on_the_command_line(tmp_path):
+    """TESSDATA_PREFIX alone is not portable across Tesseract versions.
+
+    Tesseract 5 reads it as the directory holding the language files; Tesseract 4
+    -- still what Debian 11 and Ubuntu 22.04 ship -- appends "tessdata/" and then
+    cannot find them. `--tessdata-dir` means the same thing in both.
+    """
+    from bms.config import Settings
+    from bms.ocr.text import TesseractOcr
+
+    root = tmp_path / "tesseract"
+    (root / "tessdata").mkdir(parents=True)
+    binary = root / "tesseract"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    bundled = TesseractOcr(Settings(tesseract_cmd=str(binary)))
+    assert bundled._tessdata_arguments() == ["--tessdata-dir", str(root / "tessdata")]
+
+    # A system install knows its own prefix and must be left alone.
+    assert TesseractOcr(Settings(tesseract_cmd="tesseract"))._tessdata_arguments() == []

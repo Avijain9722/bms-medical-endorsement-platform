@@ -396,7 +396,7 @@ Use the launcher, which never has this problem:
 
 ```bash
 ./deploy/start-linux.sh                                          # Linux
-powershell -ExecutionPolicy Bypass -File deploy\START-WINDOWS.bat  # Windows
+deploy\START-WINDOWS.bat                                        # Windows
 ```
 
 Or address the environment's Python explicitly:

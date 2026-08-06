@@ -34,6 +34,10 @@ echo "==> Source"
 echo "    $BINARY"
 "$BINARY" --version 2>&1 | head -1 | sed 's/^/    /'
 
+# Start clean. The binary was overwritten on a re-run but the libraries and
+# language files were not, so an upgraded tesseract ended up paired with the
+# previous release's libtesseract -- an undefined-symbol crash on every call.
+rm -rf "$VENDOR/lib" "$VENDOR/tesseract" "$VENDOR/tesseract.bin"
 mkdir -p "$VENDOR/tessdata"
 cp "$BINARY" "$VENDOR/tesseract"
 chmod +x "$VENDOR/tesseract"
@@ -45,7 +49,7 @@ echo "==> Shared libraries"
 if command -v ldd >/dev/null; then
     mkdir -p "$VENDOR/lib"
     ldd "$BINARY" | awk '/=> \//{print $3}' | while read -r lib; do
-        cp -n "$lib" "$VENDOR/lib/" 2>/dev/null || true
+        cp -f "$lib" "$VENDOR/lib/" 2>/dev/null || true
     done
     echo "    copied $(ls "$VENDOR/lib" | wc -l) libraries"
 
@@ -75,10 +79,34 @@ if [ -z "$PREFIX" ] || [ ! -d "$PREFIX" ]; then
     echo "    for Arabic) into $VENDOR/tessdata manually." >&2
 else
     for lang in eng ara osd; do
-        [ -f "$PREFIX/$lang.traineddata" ] && cp -n "$PREFIX/$lang.traineddata" "$VENDOR/tessdata/"
+        [ -f "$PREFIX/$lang.traineddata" ] && cp -f "$PREFIX/$lang.traineddata" "$VENDOR/tessdata/"
     done
     echo "    $(ls "$VENDOR/tessdata" | tr '\n' ' ')"
 fi
+
+# The program interpreter (ld-linux) is NOT bundled -- ldd prints it without a
+# "=> " so it is not copied, and forcing a foreign one is not safe anyway. The
+# target host therefore supplies ld.so while we supply libc, which only works if
+# the target's glibc is the same or newer. Say so, loudly, because the build
+# host always passes the check below regardless.
+BUILD_GLIBC="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' || echo '?')"
+cat > "$VENDOR/BUILD-HOST.txt" <<EOF
+Bundled on : $(uname -s) $(uname -m)
+glibc      : $BUILD_GLIBC
+tesseract  : $("$BINARY" --version 2>&1 | head -1)
+
+This bundle carries libc and friends but NOT the program interpreter
+(ld-linux-x86-64.so.2), which always comes from the host that runs it.
+It therefore requires a target host with glibc $BUILD_GLIBC or NEWER.
+On an older host every OCR call fails with an ld.so assertion or
+"version \`GLIBC_x.yz' not found", and scans fall back to manual entry.
+
+Check the target before copying:   ldd --version | head -1
+If the target is older, rebuild this bundle on a host matching it.
+EOF
+echo "==> Portability"
+echo "    built against glibc $BUILD_GLIBC -- target host needs $BUILD_GLIBC or newer"
+echo "    (recorded in vendor/tesseract/BUILD-HOST.txt)"
 
 echo
 echo "==> Checking the bundled copy"

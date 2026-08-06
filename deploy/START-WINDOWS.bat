@@ -64,6 +64,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Load app\.env into this process. Nothing in the runtime reads a .env file
+REM itself, and install.ps1 only sets these for its own process, which has since
+REM exited -- so without this the generated BMS_SECRET_KEY never reaches the
+REM server and every restart signs everyone out. The Linux launcher does the
+REM same thing; the two used to disagree.
+if exist "app\.env" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("app\.env") do (
+        if not "%%~A"=="" if not "%%~B"=="" set "%%~A=%%~B"
+    )
+)
+
 echo  Starting... your browser will open at http://127.0.0.1:8000
 echo.
 echo  Leave this window open while you work.

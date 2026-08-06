@@ -3,7 +3,7 @@
 The recorded run of the automated suite for the delivered build.
 
 ```
-267 tests · 0 failures · 0 errors · 0 skipped · 140.5s
+269 tests · 0 failures · 0 errors · 0 skipped · 140.5s
 ```
 
 Reproduce it with:
@@ -29,7 +29,7 @@ python3 -m pytest tests -q
 | Tesseract | 5.3.4, bundled at `vendor/tesseract/` — see §4 |
 | ClamAV | **not installed** — deliberate, see §4 |
 | Microsoft Excel | **not available** — Linux host, see §4 |
-| Result | **267 passed, 0 failed, 0 errored, 0 skipped** |
+| Result | **269 passed, 0 failed, 0 errored, 0 skipped** |
 
 Zero skips is the number to look at. Nothing was quietly stepped over because
 the host lacked something; where a capability is missing, the test asserts the
@@ -47,7 +47,8 @@ covered. This run bundled Tesseract 5.3.4 into `vendor/tesseract/` and confirmed
 - `eng`, `ara` and `osd` language data all load.
 
 Six tests were added to cover the resolution order, the language-file handling
-and the absolute-path detection, taking the suite from 246 to 252.
+and the absolute-path detection. Later work on paging, page weight and the
+export-refusal branches took it to 267.
 
 ### Independently reproduced in CI
 
@@ -77,12 +78,12 @@ development container.
 | 28 | 91.5s | `test_logbook_and_package.py` | The operational log workflow — statuses, date-range export, post-submission events — and supporting-document ZIP packaging with its manifest |
 | 27 | 11.8s | `test_pipeline.py` | End-to-end case processing against a real database and the real workbooks |
 | 27 | <0.1s | `test_matching_and_rules.py` | Member grouping, principal/dependant linkage and every validation rule |
-| 27 | <0.1s | `test_ocr.py` | Deterministic field extraction, document classification, and locating a Tesseract bundled inside the project |
+| 29 | <0.1s | `test_ocr.py` | Deterministic field extraction, document classification, and locating a Tesseract bundled inside the project |
 | 17 | 5.0s | `test_master_and_admin.py` | Client master, administration and the login mechanism |
 | 15 | 6.1s | `test_infrastructure.py` | Virus scanning, Excel recalculation, the purge scheduler and Alembic migrations |
 | 14 | <0.1s | `test_intake.py` | Pasted-instruction parsing and archive expansion |
-| 10 | 3.0s | `test_web.py` | The web tier through the real ASGI app — routing, templates, session cookie |
-| **252** | **140.5s** | | |
+| 25 | 12.4s | `test_web.py` | The web tier through the real ASGI app — routing, templates, session cookie, paging, page weight and every export-refusal branch |
+| **269** | **152.0s** | | |
 
 `test_logbook_and_package.py` and `test_template_preservation.py` account for
 four-fifths of the runtime because they open, populate and re-fingerprint real

@@ -127,6 +127,20 @@ class TesseractOcr:
             return None
         return {**os.environ, "TESSDATA_PREFIX": str(tessdata)}
 
+    def _tessdata_arguments(self) -> list[str]:
+        """`--tessdata-dir`, which means the same thing in every Tesseract.
+
+        TESSDATA_PREFIX alone is not portable: Tesseract 5 treats it as the
+        directory holding the language files, while Tesseract 4 -- still what
+        `apt-get install tesseract-ocr` gives on Debian 11 and Ubuntu 22.04 --
+        appends "tessdata/" to it and then fails to find
+        `<dir>/tessdata/eng.traineddata`. The command-line option is honoured
+        verbatim by both and takes precedence, so it is what actually makes a
+        bundled copy work across versions.
+        """
+        tessdata = self.config.tessdata_dir
+        return ["--tessdata-dir", str(tessdata)] if tessdata else []
+
     def supports(self, filename: str, data: bytes) -> bool:
         suffix = Path(filename).suffix.lower()
         return suffix in IMAGE_SUFFIXES or data[:4] == PDF_MAGIC
@@ -144,6 +158,7 @@ class TesseractOcr:
                         "stdout",
                         "-l",
                         self.config.ocr_languages,
+                        *self._tessdata_arguments(),
                     ],
                     capture_output=True,
                     timeout=180,

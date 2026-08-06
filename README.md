@@ -69,7 +69,7 @@ By instruction and by design:
 
 app/                       the application
   bms/                     pipeline, ocr, matching, validation, outputs, ooxml, web
-  tests/                   267 automated tests
+  tests/                   269 automated tests
   migrations/              Alembic
 deploy/                    install scripts and service units
 docs/                      the documentation set
@@ -82,7 +82,7 @@ never writes to it.
 ## Verify
 
 ```bash
-cd app && python3 -m pytest tests -q     # 267 tests
+cd app && python3 -m pytest tests -q     # 269 tests
 cd app && python3 tools/verify_sources.py   # supplied workbooks unaltered
 curl -s http://127.0.0.1:8000/health     # what this host can and cannot do
 ```

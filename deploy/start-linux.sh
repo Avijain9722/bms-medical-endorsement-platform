@@ -41,6 +41,10 @@ if ! "$APP/.venv/bin/python" -c "import uvicorn" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Load configuration BEFORE reading anything out of it. BMS_PORT used to be
+# expanded first, so a port set in .env was silently ignored.
+set -a; [ -f "$APP/.env" ] && . "$APP/.env"; set +a
+
 PORT="${BMS_PORT:-8000}"
 echo " Starting on http://127.0.0.1:$PORT"
 echo
@@ -48,5 +52,4 @@ echo " Press Ctrl+C to stop the platform."
 echo
 
 cd "$APP"
-set -a; [ -f "$APP/.env" ] && . "$APP/.env"; set +a
 exec .venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port "$PORT"
