@@ -107,26 +107,63 @@ Library versions move. To rebuild it on a machine that does have internet:
 
 ```bash
 cd app
-for PY in 311 312 313; do
+for PY in 312 314; do
   for PLAT in win_amd64 manylinux2014_x86_64; do
     python3 -m pip download -r requirements-dev.txt -d ../deploy/wheelhouse \
       --only-binary=:all: --platform "$PLAT" --python-version "$PY"
     python3 -m pip download pypdf -d ../deploy/wheelhouse \
       --only-binary=:all: --platform "$PLAT" --python-version "$PY"
   done
-  python3 -m pip download pywin32 -d ../deploy/wheelhouse \
+  # Windows-only, and NOT optional -- see the warning below.
+  python3 -m pip download pywin32 colorama -d ../deploy/wheelhouse \
     --only-binary=:all: --platform win_amd64 --python-version "$PY"
 done
 ```
 
-Add a Python version to the `PY` list when BMS adopts one. Then test the result
-the way it will actually be used — a clean virtual environment with the network
-refused:
+Add a Python version to the `PY` list when BMS adopts one.
 
-```bash
-python3 -m venv /tmp/check
-/tmp/check/bin/python -m pip install --no-index \
-    --find-links deploy/wheelhouse -r app/requirements-dev.txt
+### `--platform` does not make pip think it is on Windows
+
+This cost a failed installation on the BMS host, so it is worth stating plainly.
+
+`--platform win_amd64` chooses which wheel **tags** are acceptable. It does not
+change the environment markers pip evaluates. A requirement written
+
+```
+colorama ; platform_system == "Windows"
 ```
 
-If that succeeds, the bundle is complete.
+is therefore tested against the *building* machine — Linux — decided to be
+False, and silently left out. The bundle looks complete and installs cleanly
+here, then fails on the BMS host with:
+
+```
+ERROR: Could not find a version that satisfies the requirement colorama;
+platform_system == "Windows" (from click)
+```
+
+Anything behind such a marker has to be named explicitly, as `colorama` is
+above.
+
+### Verify it the way that actually catches this
+
+The obvious check — installing from the wheelhouse with `--no-index` on the
+build machine — **does not work**. It skips the Windows-gated requirement for
+exactly the same wrong reason the download did, and passes.
+
+Use the checker instead. It reads each wheel's own metadata and reports every
+requirement a Windows host would activate that is not in the folder. No network,
+no Windows needed:
+
+```bash
+cd app
+python3 tools/check_wheelhouse.py ../deploy/wheelhouse
+```
+
+It exits non-zero when something is missing, so it can gate a release. A local
+`--no-index` install is still worth running afterwards — it catches a different
+class of problem, a wheel whose tags do not match the target — but on its own it
+is not evidence the bundle is complete.
+
+The only complete proof is an install on Windows itself, which is what the
+`windows-install` CI job does on every change.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -328,3 +329,64 @@ def test_availability_is_about_excel_not_about_pywin32():
         assert isinstance(available, bool)
         if not available:
             assert "pywin32" in reason or "Excel" in reason
+
+
+# ------------------------------------------------------- the offline bundle
+
+
+def _wheel(directory: Path, name: str, version: str, requires: list[str] | None = None) -> None:
+    """A minimal but structurally real wheel, enough for metadata inspection."""
+    dist = f"{name.replace('-', '_')}-{version}"
+    path = directory / f"{dist}-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w") as archive:
+        lines = [f"Name: {name}", f"Version: {version}", "Metadata-Version: 2.1"]
+        lines += [f"Requires-Dist: {r}" for r in requires or []]
+        archive.writestr(f"{dist}.dist-info/METADATA", "\n".join(lines) + "\n")
+
+
+def test_a_windows_only_requirement_missing_from_the_bundle_is_caught(tmp_path):
+    """The failure this checker exists for, reproduced.
+
+    `pip download --platform win_amd64` selects wheel tags; it does not evaluate
+    environment markers as Windows. So `colorama ; platform_system == "Windows"`
+    is judged against the Linux build host, decided False, and left out -- and
+    the obvious verification, installing from the bundle with --no-index on that
+    same host, passes for exactly the same wrong reason. The BMS host then fails
+    at install time. This reads the wheels' own metadata instead.
+    """
+    from tools.check_wheelhouse import missing_for_windows
+
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    _wheel(wheelhouse, "pytest", "9.1.1", ['colorama ; sys_platform == "win32"'])
+    _wheel(wheelhouse, "click", "8.4.2", ['colorama ; platform_system == "Windows"'])
+
+    gaps = missing_for_windows(wheelhouse)
+    assert {name for name, _, _ in gaps} == {"colorama"}
+
+    _wheel(wheelhouse, "colorama", "0.4.6")
+    assert missing_for_windows(wheelhouse) == []
+
+
+def test_an_optional_extra_is_not_reported_as_missing(tmp_path):
+    """A requirement behind an extra is not installed unless asked for, so its
+    absence is not a defect and must not fail a release."""
+    from tools.check_wheelhouse import missing_for_windows
+
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    _wheel(
+        wheelhouse, "uvicorn", "0.52.1",
+        ['colorama ; sys_platform == "win32" and extra == "standard"'],
+    )
+    assert missing_for_windows(wheelhouse) == []
+
+
+def test_a_requirement_with_no_marker_at_all_is_not_windows_gated(tmp_path):
+    """Unconditional requirements are pip's problem, not this checker's."""
+    from tools.check_wheelhouse import missing_for_windows
+
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    _wheel(wheelhouse, "fastapi", "0.141.1", ["starlette", "pydantic>=2"])
+    assert missing_for_windows(wheelhouse) == []
