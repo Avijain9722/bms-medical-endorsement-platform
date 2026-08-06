@@ -7,14 +7,16 @@ work survives a refresh, a logout, a restart and the end of the day.
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import pipeline
@@ -40,9 +42,13 @@ from ..models import (
     User,
 )
 from ..outputs import log as log_output
+from ..outputs.mapping import UnsupportedValue
+from ..registry.generate import StructuralDrift, UnknownField
 from ..outputs.nas import SUPPORTED_KEYS
 from ..storage import ExportStorage
 from .security import COOKIE_NAME, hash_password, issue_session, read_session, verify_password
+
+logger = logging.getLogger("bms.web")
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -131,8 +137,116 @@ async def _redirect_handler(request: Request, exc: HTTPException):
     return HTMLResponse(f"<h1>{exc.status_code}</h1><p>{exc.detail}</p>", status_code=exc.status_code)
 
 
+@app.exception_handler(Exception)
+async def _unexpected_handler(request: Request, exc: Exception):
+    """Anything not anticipated.
+
+    The traceback goes to the server log, where an administrator can read it; the
+    browser gets a reference to quote and nothing else. A stack trace rendered
+    into the page would disclose file paths, library versions and query
+    fragments to whoever triggered it.
+    """
+    import uuid
+
+    reference = uuid.uuid4().hex[:12]
+    logger.exception("unhandled error %s on %s %s", reference, request.method, request.url.path)
+    return HTMLResponse(
+        "<h1>Something went wrong</h1>"
+        "<p>The error has been recorded. Nothing was submitted to an insurer.</p>"
+        f"<p>Quote reference <code>{reference}</code> to your administrator, "
+        "who can find it in the server log.</p>"
+        '<p><a href="/">Back to cases</a></p>',
+        status_code=500,
+    )
+
+
+# Every way a generated file can be refused. All four mean the same thing to the
+# operator -- this must not be sent to the insurer -- so all four are shown on
+# the case screen rather than reaching the browser as an unexplained 500.
+EXPORT_REFUSALS = (
+    pipeline.ExportBlocked,
+    StructuralDrift,
+    UnknownField,
+    UnsupportedValue,
+)
+
+
+def _explain_refusal(error: Exception) -> str:
+    """Say what the refusal means and what to do about it.
+
+    The exception messages are precise but assume the reader knows the internals;
+    the Medical Team needs to know whose problem it is.
+    """
+    if isinstance(error, StructuralDrift):
+        return (
+            "Export blocked: the generated workbook no longer matches the master "
+            "template supplied by the insurer, so it must not be uploaded. This is "
+            "not a problem with the member data. Report it to your administrator, "
+            f"quoting: {error}"
+        )
+    if isinstance(error, UnsupportedValue):
+        return (
+            "Export blocked: this insurer's own dropdown cannot express one of the "
+            "values on this case, and the platform will not substitute a nearest "
+            f"match. {error}"
+        )
+    if isinstance(error, UnknownField):
+        return (
+            "Export blocked: this template is configured to write a field that does "
+            f"not exist in it. Report it to your administrator, quoting: {error}"
+        )
+    return str(error)
+
+
 def render(request: Request, name: str, **context) -> HTMLResponse:
     return templates.TemplateResponse(request, name, context)
+
+
+# How many rows any list screen puts on one page. The operational log grows
+# without bound, so every list is paged rather than rendered whole: a page the
+# browser has to lay out in full gets slower every month until it is unusable.
+PAGE_SIZE = 50
+
+
+@dataclass(frozen=True)
+class Paging:
+    """Bounds for one page of a list, and the links either side of it."""
+
+    total: int
+    page: int
+    size: int = PAGE_SIZE
+
+    def __post_init__(self) -> None:
+        # A hand-typed ?page=0 or ?page=-5 must not become a negative OFFSET.
+        object.__setattr__(self, "page", max(1, self.page))
+
+    @property
+    def pages(self) -> int:
+        return max(1, -(-self.total // self.size))
+
+    @property
+    def current(self) -> int:
+        return min(self.page, self.pages)
+
+    @property
+    def offset(self) -> int:
+        return (self.current - 1) * self.size
+
+    @property
+    def first_row(self) -> int:
+        return 0 if self.total == 0 else self.offset + 1
+
+    @property
+    def last_row(self) -> int:
+        return min(self.offset + self.size, self.total)
+
+    @property
+    def has_previous(self) -> bool:
+        return self.current > 1
+
+    @property
+    def has_next(self) -> bool:
+        return self.current < self.pages
 
 
 def _load_case(session: Session, case_id: str) -> Case:
@@ -192,11 +306,21 @@ def logout():
 @app.get("/", response_class=HTMLResponse)
 def case_list(
     request: Request,
+    page: int = 1,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    cases = list(session.scalars(select(Case).order_by(Case.created_at.desc()).limit(200)))
-    return render(request, "cases.html", cases=cases, user=user)
+    total = int(session.scalar(select(func.count()).select_from(Case)) or 0)
+    paging = Paging(total=total, page=page, size=PAGE_SIZE)
+    cases = list(
+        session.scalars(
+            select(Case)
+            .order_by(Case.created_at.desc())
+            .offset(paging.offset)
+            .limit(paging.size)
+        )
+    )
+    return render(request, "cases.html", cases=cases, user=user, paging=paging)
 
 
 @app.get("/cases/new", response_class=HTMLResponse)
@@ -210,8 +334,25 @@ def new_case_form(
         "case_new.html",
         user=user,
         templates_available=SUPPORTED_KEYS,
-        clients=_master_snapshot(session),
+        clients=_client_index(session),
     )
+
+
+@app.get("/clients/{client_id}/options")
+def client_options(
+    client_id: str,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """The sub-groups, entities and policies of one company.
+
+    Signed-in only, like every other route: the client master is BMS commercial
+    data, not public reference.
+    """
+    client = session.get(Client, client_id)
+    if client is None or not client.active:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return _client_options(client)
 
 
 @app.post("/cases")
@@ -524,9 +665,12 @@ def export(
     case = _load_case(session, case_id)
     try:
         pipeline.export_case(session, case, template_key=template_key, actor=user.username)
-    except (pipeline.ExportBlocked, Exception) as error:  # noqa: BLE001 - surfaced to the user
-        if not isinstance(error, pipeline.ExportBlocked):
-            raise
+    except EXPORT_REFUSALS as error:
+        # Four different refusals, all of which mean "this file must not be sent
+        # to the insurer", and all of which the operator has to be able to act
+        # on. Only ExportBlocked was handled before; the rest reached the browser
+        # as an unexplained 500 -- worst of all StructuralDrift, which is the
+        # check that stops a structurally damaged workbook being uploaded.
         members = list(
             session.scalars(select(Member).where(Member.case_id == case.id).order_by(Member.row_index))
         )
@@ -546,7 +690,7 @@ def export(
             user=user,
             templates_available=SUPPORTED_KEYS,
             severity=Severity,
-            error=str(error),
+            error=_explain_refusal(error),
         )
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
@@ -596,14 +740,22 @@ def close(
 def audit_log(
     request: Request,
     case_id: str | None = None,
+    page: int = 1,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    query = select(AuditEvent).order_by(AuditEvent.at.desc()).limit(500)
+    counter = select(func.count()).select_from(AuditEvent)
+    query = select(AuditEvent).order_by(AuditEvent.at.desc())
     if case_id:
         query = query.where(AuditEvent.case_id == case_id)
-    events = list(session.scalars(query))
-    return render(request, "audit.html", events=events, user=user, case_id=case_id)
+        counter = counter.where(AuditEvent.case_id == case_id)
+
+    # The audit trail is append-only and never purged, so it only ever grows.
+    paging = Paging(total=int(session.scalar(counter) or 0), page=page, size=PAGE_SIZE)
+    events = list(session.scalars(query.offset(paging.offset).limit(paging.size)))
+    return render(
+        request, "audit.html", events=events, user=user, case_id=case_id, paging=paging
+    )
 
 
 @app.get("/health")
@@ -635,11 +787,14 @@ def health():
 # ------------------------------------------------------------ administration
 
 
-def _master_snapshot(session: Session) -> list[dict]:
-    """The client master, shaped for the case form's dependent dropdowns."""
-    snapshot = []
-    for client in master.active_clients(session):
-        snapshot.append(
+def _client_options(client) -> dict:
+    """One company's sub-groups, entities and policies, for the case form.
+
+    Fetched for the selected company only. The whole master used to be embedded
+    in the page -- 707 KB of JSON at 500 companies, on every visit, nearly all of
+    it for companies the operator was not choosing.
+    """
+    return (
             {
                 "id": client.id,
                 "name": client.name,
@@ -670,8 +825,15 @@ def _master_snapshot(session: Session) -> list[dict]:
                     if p.active
                 ],
             }
-        )
-    return snapshot
+    )
+
+
+def _client_index(session: Session) -> list[dict]:
+    """Just enough to populate the company dropdown: id, name, code."""
+    return [
+        {"id": c.id, "name": c.name, "code": c.code}
+        for c in master.active_clients(session)
+    ]
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -941,6 +1103,7 @@ def log_screen(
     insurer: str | None = None,
     status: str | None = None,
     entry_type: str | None = None,
+    page: int = 1,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
@@ -952,7 +1115,12 @@ def log_screen(
         status=status or None,
         entry_type=entry_type or None,
     )
-    entries = logbook.query(session, criteria, limit=1000)
+    # One page at a time. The log grows without bound -- it is the permanent
+    # operational record -- so rendering every matching row would make the screen
+    # heavier every month until it stopped being usable.
+    total = logbook.count(session, criteria)
+    paging = Paging(total=total, page=page, size=PAGE_SIZE)
+    entries = logbook.query(session, criteria, limit=paging.size, offset=paging.offset)
     cases = {
         case.id: case
         for case in session.scalars(select(Case).where(Case.id.in_({e.case_id for e in entries})))
@@ -965,6 +1133,7 @@ def log_screen(
         entries=entries,
         cases=cases,
         criteria=criteria,
+        paging=paging,
         filters={
             "date_from": date_from or "",
             "date_to": date_to or "",
@@ -1003,6 +1172,33 @@ def log_export(
     download = logbook.export_range(session, criteria, actor=user.username, config=settings)
     path = ExportStorage(settings).absolute(download.relative_path)
     return FileResponse(path, filename=download.filename)
+
+
+@app.get("/log/{entry_id}", response_class=HTMLResponse)
+def log_entry_screen(
+    entry_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """One log row, with the workflow actions that write its blank columns.
+
+    These forms used to be rendered inside every row of the list. Five forms per
+    row meant the list carried thousands of controls the browser had to lay out
+    whether or not anyone touched them; on demand, it carries none.
+    """
+    entry = session.get(LogEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+    return render(
+        request,
+        "log_entry.html",
+        user=user,
+        entry=entry,
+        case=session.get(Case, entry.case_id),
+        statuses=logbook.LOG_STATUSES,
+        events=log_output.RECORDABLE_EVENTS,
+    )
 
 
 @app.post("/log/{entry_id}/event")

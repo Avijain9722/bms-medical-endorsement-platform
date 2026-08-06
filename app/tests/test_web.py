@@ -7,6 +7,7 @@ are all covered.
 from __future__ import annotations
 
 import io
+import itertools
 import sys
 import zipfile
 from pathlib import Path
@@ -245,3 +246,297 @@ def test_health_reports_the_available_ocr_engines(client):
     assert payload["status"] == "ok"
     assert "ocr_engines" in payload
     assert payload["database"] == "sqlite"
+
+
+# ------------------------------------------------- paging and browser weight
+#
+# The operational log is the permanent record and only ever grows. A screen that
+# renders every matching row gets heavier every month until it stops being
+# usable, so these fix the shape of the pages rather than trusting them to stay
+# reasonable.
+
+
+_seeded = itertools.count()
+
+
+def _seed_log(count: int) -> list[str]:
+    """`count` log entries, each on its own case. Returns their ids.
+
+    Case references are globally unique, so the counter keeps repeat calls in
+    one test from colliding.
+    """
+    from datetime import date
+
+    from bms.models import LogEntry
+
+    ids = []
+    with db.session_scope() as session:
+        for index in range(count):
+            case = Case(
+                reference=f"L{next(_seeded):05d}", client_name="DEMO CLIENT", insurer="NAS",
+                transaction_type="addition", status="exported", bms_comments="",
+            )
+            session.add(case)
+            session.flush()
+            entry = LogEntry(
+                case_id=case.id, client_name="DEMO CLIENT", insurer="NAS",
+                beneficiary_name=f"Person {index}", relation="Principal",
+                entry_type="ADDITION", effective_date=date.today().isoformat(),
+                status="PENDING TO INSURER",
+            )
+            session.add(entry)
+            session.flush()
+            ids.append(entry.id)
+    return ids
+
+
+def test_the_log_shows_one_page_however_many_rows_there_are(client):
+    sign_in(client)
+    _seed_log(120)
+
+    page = client.get("/log")
+    assert page.status_code == 200
+    # 50 data rows plus the header row.
+    assert page.text.count("<tr") == web_app.PAGE_SIZE + 1
+    assert "120 row(s)" in page.text          # the total is still reported
+    assert "page 1 of 3" in page.text
+
+
+def test_paging_reaches_every_row_without_overlap(client):
+    sign_in(client)
+    _seed_log(120)
+
+    seen = []
+    for number in (1, 2, 3):
+        text = client.get(f"/log?page={number}").text
+        seen += [name for name in (f"Person {i}" for i in range(120)) if f">{name}<" in text]
+
+    assert len(seen) == 120, "every row should appear exactly once across the pages"
+    assert len(set(seen)) == 120
+
+
+def test_out_of_range_page_numbers_are_clamped_not_crashed(client):
+    """A hand-typed ?page=0 must not become a negative SQL OFFSET."""
+    sign_in(client)
+    _seed_log(60)
+
+    for value in ("0", "-5", "9999"):
+        response = client.get(f"/log?page={value}")
+        assert response.status_code == 200, value
+        assert "Person" in response.text
+
+
+def test_the_log_list_carries_no_per_row_editor(client):
+    """The five workflow forms live on the entry screen, not in every row.
+
+    Rendering them per row put thousands of controls in the DOM whether or not
+    anyone used them, which is what made the screen heavy.
+    """
+    sign_in(client)
+    _seed_log(50)
+
+    text = client.get("/log").text
+    # The only form posting to a log route is the export button.
+    assert text.count('action="/log/') == 1
+    assert 'action="/log/export"' in text
+    assert 'name="request_ref_no"' not in text
+    assert 'name="saiba_voucher_no"' not in text
+
+
+def test_the_entry_screen_carries_the_editor(client):
+    sign_in(client)
+    entry_id = _seed_log(1)[0]
+
+    page = client.get(f"/log/{entry_id}")
+    assert page.status_code == 200
+    for field in ("request_ref_no", "card_no", "saiba_voucher_no", "bbm_invoice_date", "remarks"):
+        assert f'name="{field}"' in page.text
+    assert client.get("/log/does-not-exist").status_code == 404
+
+
+def test_page_weight_does_not_grow_with_the_log(client):
+    """The guarantee, stated as a number: ten times the rows, same page.
+
+    Measured at 3.1 MB and 57,081 elements before paging, at 1,000 entries.
+    """
+    sign_in(client)
+
+    _seed_log(60)
+    small = client.get("/log").text
+
+    _seed_log(600)
+    large = client.get("/log").text
+
+    assert abs(len(large) - len(small)) < 2048, "page size should not track the row count"
+    for text in (small, large):
+        assert len(text.encode()) < 200 * 1024
+        assert text.count("<") < 5000
+
+
+def test_cases_and_audit_are_paged_too(client):
+    sign_in(client)
+    _seed_log(120)
+
+    cases = client.get("/")
+    assert cases.text.count("<tr") <= web_app.PAGE_SIZE + 1
+
+    audit = client.get("/audit")
+    assert audit.status_code == 200
+    assert audit.text.count("<tr") <= web_app.PAGE_SIZE + 1
+
+
+def test_the_case_form_does_not_embed_the_whole_client_master(client):
+    """It embedded every company's sub-groups, entities and policies -- 707 KB
+    of JSON at 500 companies, on every visit, nearly all of it unused."""
+    from bms.models import Client as ClientRecord, ClientPolicy, LegalEntity, SubGroup
+
+    sign_in(client)
+    with db.session_scope() as session:
+        for index in range(40):
+            record = ClientRecord(name=f"COMPANY {index:03d} TRADING L.L.C.")
+            session.add(record)
+            session.flush()
+            for k in range(3):
+                session.add(SubGroup(client_id=record.id, name=f"Division {k}", emirate="Dubai"))
+                session.add(LegalEntity(client_id=record.id, name=f"Entity {index}-{k}"))
+                session.add(
+                    ClientPolicy(client_id=record.id, insurer="NAS", policy_no=f"P{index}{k}")
+                )
+
+    page = client.get("/cases/new")
+    assert page.status_code == 200
+    # The company names are needed to choose from; their contents are not.
+    assert "COMPANY 000 TRADING L.L.C." in page.text
+    assert "Division 0" not in page.text
+    assert "Entity 0-0" not in page.text
+
+
+def test_one_companys_options_are_fetched_on_demand(client):
+    from bms.models import Client as ClientRecord, ClientPolicy, LegalEntity, SubGroup
+
+    sign_in(client)
+    with db.session_scope() as session:
+        record = ClientRecord(name="ACME GROUP LLC")
+        session.add(record)
+        session.flush()
+        session.add(SubGroup(client_id=record.id, name="Abu Dhabi Operations", emirate="Abu Dhabi"))
+        session.add(LegalEntity(client_id=record.id, name="ACME Trading LLC"))
+        session.add(ClientPolicy(client_id=record.id, insurer="NAS", policy_no="POL-1"))
+        client_id = record.id
+
+    payload = client.get(f"/clients/{client_id}/options")
+    assert payload.status_code == 200
+    body = payload.json()
+    assert body["name"] == "ACME GROUP LLC"
+    assert body["sub_groups"][0]["emirate"] == "Abu Dhabi"
+    assert body["entities"][0]["name"] == "ACME Trading LLC"
+    assert body["policies"][0]["policy_no"] == "POL-1"
+
+    assert client.get("/clients/nope/options").status_code == 404
+
+
+def test_the_client_master_is_not_readable_without_signing_in(client):
+    """It is BMS commercial data, not public reference."""
+    response = client.get("/clients/anything/options")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_the_case_form_title_is_a_title(client):
+    """The whole dropdown script once sat inside {% block title %}, so it was
+    rendered into <title> as well as the body."""
+    sign_in(client)
+    page = client.get("/cases/new")
+    import re
+
+    title = re.search(r"<title>(.*?)</title>", page.text, re.S).group(1)
+    assert title.strip() == "New case"
+    assert "<script" not in title
+    assert page.text.count("<script") == 1
+
+
+# ------------------------------------------------------------- error branches
+#
+# Four different refusals all mean "this must not be sent to the insurer". Only
+# one of them was handled; the rest reached the browser as an unexplained 500 --
+# worst of all StructuralDrift, the check that stops a damaged workbook being
+# uploaded to a portal.
+
+
+def _approved_case(client) -> str:
+    """A case with one approved member, ready to export."""
+    from datetime import date
+
+    sign_in(client)
+    created = client.post(
+        "/cases",
+        data={
+            "client_name": "DEMO", "insurer": "NAS", "transaction_type": "addition",
+            "bms_comments": "Add 90001 Demo Person Single CAT B",
+        },
+    )
+    case_id = created.headers["location"].rsplit("/", 1)[-1]
+    client.post(f"/cases/{case_id}/process")
+    with db.session_scope() as session:
+        member = session.scalars(select(Member).where(Member.case_id == case_id)).one()
+        member.first_name, member.last_name = "Demo", "Person"
+        member.date_of_birth, member.gender = "1990-01-01", "Female"
+        member.marital_status, member.nationality = "Single", "India"
+        member.relation, member.category = "Principal", "CAT B"
+        member.effective_date = date.today().isoformat()
+        member.emirates_id = "784-1990-1234567-1"
+        member.provenance = {}
+        member_id = member.id
+    client.post(f"/cases/{case_id}/members/{member_id}/approve")
+    return case_id
+
+
+@pytest.mark.parametrize(
+    "exception, expected",
+    [
+        ("StructuralDrift", "no longer matches the master"),
+        ("UnsupportedValue", "cannot express"),
+        ("UnknownField", "does not exist in it"),
+    ],
+)
+def test_every_export_refusal_is_explained_not_a_500(client, monkeypatch, exception, expected):
+    case_id = _approved_case(client)
+
+    from bms.outputs.mapping import UnsupportedValue
+    from bms.registry.generate import StructuralDrift, UnknownField
+
+    raised = {"StructuralDrift": StructuralDrift, "UnsupportedValue": UnsupportedValue,
+              "UnknownField": UnknownField}[exception]
+
+    def refuse(*args, **kwargs):
+        if exception == "StructuralDrift":
+            raise raised("nas.addition.aldar.v1", ["sheet order changed"])
+        raise raised("Parent")
+
+    monkeypatch.setattr("bms.web.app.pipeline.export_case", refuse)
+    response = client.post(f"/cases/{case_id}/export", data={"template_key": "nas.addition.aldar.v1"})
+
+    assert response.status_code == 200, "a refusal is shown on the case screen, not a 500"
+    assert expected in response.text
+    assert "Traceback" not in response.text
+
+
+def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkeypatch):
+    """A traceback in the page would disclose paths, versions and query text."""
+    import re
+
+    sign_in(client)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("database connection lost mid-query")
+
+    monkeypatch.setattr("bms.web.app.logbook.count", explode)
+    unhandled = TestClient(web_app.app, raise_server_exceptions=False)
+    unhandled.cookies = client.cookies
+    response = unhandled.get("/log")
+
+    assert response.status_code == 500
+    assert "database connection lost" not in response.text
+    assert "Traceback" not in response.text
+    assert "RuntimeError" not in response.text
+    assert re.search(r"<code>[0-9a-f]{12}</code>", response.text), "a reference to quote"

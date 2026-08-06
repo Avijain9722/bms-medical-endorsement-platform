@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from . import audit
@@ -86,13 +86,33 @@ def _apply(query: Select, criteria: LogFilter) -> Select:
     return query
 
 
-def query(session: Session, criteria: LogFilter | None = None, *, limit: int | None = None) -> list[LogEntry]:
+def query(
+    session: Session,
+    criteria: LogFilter | None = None,
+    *,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> list[LogEntry]:
     statement = select(LogEntry).order_by(LogEntry.created_at)
     if criteria:
         statement = _apply(statement, criteria)
+    if offset:
+        statement = statement.offset(offset)
     if limit:
         statement = statement.limit(limit)
     return list(session.scalars(statement))
+
+
+def count(session: Session, criteria: LogFilter | None = None) -> int:
+    """How many rows match, without loading any of them.
+
+    The screen needs the total to page through and to label the export, but
+    reading every row to count them is what the paging is there to avoid.
+    """
+    statement = select(func.count()).select_from(LogEntry)
+    if criteria:
+        statement = _apply(statement, criteria)
+    return int(session.scalar(statement) or 0)
 
 
 def distinct_values(session: Session, column) -> list[str]:

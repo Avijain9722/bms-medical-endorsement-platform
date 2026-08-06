@@ -28,7 +28,7 @@ The six post-submission columns stay blank until the corresponding event is reco
   <form method="post" action="/log/export" style="margin-top:.75rem">
     {% for key, value in filters.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
     <button type="submit" class="secondary">Download New Log Format -2026 for this filter</button>
-    <span class="muted">{{ entries|length }} row(s) &middot; {{ criteria.describe() }}</span>
+    <span class="muted">{{ paging.total }} row(s) &middot; {{ criteria.describe() }}</span>
   </form>
 </div>
 
@@ -39,7 +39,7 @@ The six post-submission columns stay blank until the corresponding event is reco
     <tr>
       <th>Case</th><th>Beneficiary</th><th>Relation</th><th>Entry type</th><th>Effective</th>
       <th>Status</th><th>Ref. no.</th><th>Sent to insurer</th><th>Card #</th><th>Card sent</th>
-      <th>Saiba voucher</th><th>BBM invoice</th>
+      <th>Saiba voucher</th><th>BBM invoice</th><th></th>
     </tr>
     {% for e in entries %}
     <tr>
@@ -57,52 +57,26 @@ The six post-submission columns stay blank until the corresponding event is reco
       <td>{{ e.card_receive_and_sent_date or '' }}</td>
       <td>{{ e.saiba_voucher_no or '' }}</td>
       <td>{{ e.bbm_invoice_date or '' }}</td>
-    </tr>
-    <tr>
-      <td colspan="12" style="background:#fbfcfd">
-        <div class="grid three">
-          <form method="post" action="/log/{{ e.id }}/event" class="grid">
-            <input type="hidden" name="event" value="submitted_to_insurer">
-            <label>Record submission to insurer</label>
-            <input type="text" name="request_ref_no" placeholder="Request Ref. No." value="">
-            <input type="text" name="request_sent_date_to_insurer" placeholder="Sent date dd/mm/yyyy">
-            <button class="secondary">Record submission</button>
-          </form>
-          <form method="post" action="/log/{{ e.id }}/event" class="grid">
-            <input type="hidden" name="event" value="card_received">
-            <label>Record card issued / sent</label>
-            <input type="text" name="card_no" placeholder="CARD #">
-            <input type="text" name="card_receive_and_sent_date" placeholder="Card date dd/mm/yyyy">
-            <button class="secondary">Record card</button>
-          </form>
-          <form method="post" action="/log/{{ e.id }}/fields" class="grid">
-            <label>Status and remarks</label>
-            <select name="status">
-              {% for s in statuses %}<option value="{{ s }}" {% if e.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
-            </select>
-            <input type="text" name="remarks" placeholder="REMARKS" value="{{ e.remarks or '' }}">
-            <input type="text" name="remarks2" placeholder="Remarks2" value="{{ e.remarks2 or '' }}">
-            <button class="secondary">Save</button>
-          </form>
-          <form method="post" action="/log/{{ e.id }}/event" class="grid">
-            <input type="hidden" name="event" value="voucher_recorded">
-            <label>Saiba voucher</label>
-            <input type="text" name="saiba_voucher_no" placeholder="Saiba Voucher No.">
-            <button class="secondary">Record voucher</button>
-          </form>
-          <form method="post" action="/log/{{ e.id }}/event" class="grid">
-            <input type="hidden" name="event" value="invoice_dated">
-            <label>BBM invoice date</label>
-            <input type="text" name="bbm_invoice_date" placeholder="dd/mm/yyyy">
-            <button class="secondary">Record invoice date</button>
-          </form>
-        </div>
-        <p class="muted">Placeholders such as <code>N/A</code>, <code>Pending</code>, <code>-</code>
-        or <code>0</code> are refused &mdash; a blank cell is the correct state until the value exists.</p>
-      </td>
+      <td><a href="/log/{{ e.id }}">Update</a></td>
     </tr>
     {% endfor %}
   </table>
+  {% if paging.pages > 1 %}
+  <p class="muted" style="margin-top:.75rem">
+    Showing {{ paging.first_row }}&ndash;{{ paging.last_row }} of {{ paging.total }}
+    &middot; page {{ paging.current }} of {{ paging.pages }}
+    {% set q = [] %}{% for k, v in filters.items() %}{% if v %}{% set _ = q.append(k ~ '=' ~ v) %}{% endif %}{% endfor %}
+    {% set qs = ('&' ~ q|join('&')) if q else '' %}
+    {% if paging.has_previous %}
+      &middot; <a href="/log?page=1{{ qs }}">First</a>
+      &middot; <a href="/log?page={{ paging.current - 1 }}{{ qs }}">Previous</a>
+    {% endif %}
+    {% if paging.has_next %}
+      &middot; <a href="/log?page={{ paging.current + 1 }}{{ qs }}">Next</a>
+      &middot; <a href="/log?page={{ paging.pages }}{{ qs }}">Last</a>
+    {% endif %}
+  </p>
+  {% endif %}
 </div>
 {% else %}
 <div class="card"><p class="muted">No log entries match this filter. Entries are created when a case is exported.</p></div>

@@ -204,6 +204,66 @@ timestamps, dialect-neutral JSON, string UUID keys. Alembic runs on both, with
 `render_as_batch` so SQLite's inability to alter columns in place is handled
 automatically.
 
+## 4a. Runtime footprint
+
+What the BMS host actually needs, verified by auditing every import in the
+runtime tree rather than by reading the requirements file:
+
+| Required | Why |
+| --- | --- |
+| **Python 3.11+** | The runtime. Everything else installs from the offline bundle |
+| **uvicorn** | The only network listener. Bound to `127.0.0.1` |
+| **FastAPI** | Imported by exactly one file — the web app |
+| **SQLAlchemy** | Imported by eight — the data layer |
+
+Optional, each degrading visibly rather than failing:
+
+| Optional | Without it |
+| --- | --- |
+| **Tesseract** | Scans flagged for manual entry. Nothing guessed |
+| **ClamAV** | Uploads recorded `unavailable`, never `clean` |
+| **Excel + pywin32** | Log and Daman formulas left for Excel to compute on open |
+| **pypdf** | PDFs fall through to the next reader |
+
+Deliberately absent, and confirmed absent:
+
+- **No database server.** SQLite ships inside Python. PostgreSQL is supported,
+  not required.
+- **No Celery, Redis or message broker.** The retention purge is an asyncio task
+  in-process; there is no queue to run.
+- **No Node, npm or build step.** Templates are server-rendered Jinja2.
+- **No HTTP client anywhere in the runtime tree** — no `requests`, `httpx`,
+  `urllib` or `aiohttp` import outside the tests. The platform cannot call out
+  even by accident.
+- **No external asset.** No CDN, no web font, no analytics, no remote image.
+  Every byte the browser loads comes from the host. Checked, not assumed: a
+  single inline `<script>` on one screen, and nothing else.
+
+That last point is what makes the offline claim real. An internal application
+that pulls a font or a script from a CDN leaks the fact of its use to a third
+party and breaks entirely on an air-gapped host.
+
+## 4b. Keeping the browser light
+
+Server-rendered HTML with no client framework is only lightweight if the pages
+stay bounded. Two things made them grow without limit, both measured rather than
+guessed:
+
+**The operational log** rendered every matching row, and each row carried five
+workflow forms. At 1,000 entries that was **3.1 MB of HTML and 57,081 DOM
+elements** — browsers begin to struggle past roughly 10,000. Now every list is
+paged at 50 rows and the editor lives on its own screen: **32 KB and 1,035
+elements, identical at 10,000 entries.**
+
+**The new-case form** embedded the entire client master as JSON so its dropdowns
+could cascade. At 500 companies that was **707 KB on every visit**, nearly all of
+it for companies the operator was not going to choose. Now the page carries only
+company names and fetches one company's sub-groups, entities and policies on
+selection — **1.3 KB, constant.**
+
+Both are held by tests that assert the page stays bounded as rows are added, so
+the next feature cannot quietly reintroduce the problem.
+
 ## 5. Security posture
 
 | | |
