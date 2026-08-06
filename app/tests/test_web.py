@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import itertools
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -543,6 +544,52 @@ def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkey
     assert re.search(r"<code>[0-9a-f]{12}</code>", response.text), "a reference to quote"
 
 
+def test_an_error_message_never_reflects_input_as_live_markup(client):
+    """Several 400s quote back what the user sent, and that page is hand-built.
+
+    The templates are escaped by Jinja, but this response is assembled as a
+    string, so an unescaped detail is a reflected script injection -- and the
+    page's own CSP permits inline script, so it would execute rather than merely
+    render. Here the attacker's channel is the username field.
+    """
+    sign_in(client)
+    with db.session_scope() as session:
+        session.scalar(select(User).where(User.username == "tester")).is_admin = True
+
+    payload = "<script>alert('xss')</script>"
+    form = {"username": payload, "display_name": "x", "password": "password123"}
+    assert client.post("/admin/users", data=form).status_code == 303
+
+    reflected = client.post("/admin/users", data=form)
+    assert reflected.status_code == 400
+    assert payload not in reflected.text, "the raw script tag reached the browser"
+    assert "&lt;script&gt;" in reflected.text, "it should be shown, escaped"
+
+
+def test_an_administrator_import_is_bounded_like_every_other_upload(client, monkeypatch):
+    """This route read the whole body first and checked the size never.
+
+    The limit that protects /cases/{id}/upload did not apply here at all, so one
+    oversized workbook was fully resident in memory before anything looked at it.
+    """
+    sign_in(client)
+    with db.session_scope() as session:
+        session.scalar(select(User).where(User.username == "tester")).is_admin = True
+    import dataclasses
+
+    # Settings is frozen by design, so swap the object rather than mutate it.
+    monkeypatch.setattr(
+        web_app, "settings", dataclasses.replace(web_app.settings, max_upload_bytes=1024)
+    )
+
+    response = client.post(
+        "/admin/clients/import",
+        files={"workbook": ("big.xlsx", io.BytesIO(b"x" * 5000), "application/vnd.ms-excel")},
+    )
+    assert response.status_code == 400
+    assert "maximum upload size" in response.text
+
+
 # --------------------------------------------------- hardening and efficiency
 
 
@@ -716,6 +763,25 @@ def test_signing_out_is_protected_too(client):
     assert client.post("/logout").status_code == 303
 
 
+def test_signing_out_works_with_only_what_the_page_actually_contains(client):
+    """The regression the counting test below could not see.
+
+    BrowserClient attaches a token to every POST, so it proves the guard accepts
+    a token -- not that the rendered page carries one where the browser will find
+    it. The hidden field sat one line outside the sign-out form, so a real
+    browser submitted nothing and every sign-out was refused as a forgery. This
+    submits exactly the fields inside that form and nothing else.
+    """
+    sign_in(client)
+    page = client.get("/").text
+    form = re.search(r'<form[^>]*action="/logout".*?</form>', page, re.S)
+    assert form, "the sign-out form is not on the page at all"
+    fields = dict(
+        re.findall(r'<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"', form.group(0))
+    )
+    assert client.post("/logout", data=fields, csrf=False).status_code == 303
+
+
 def test_login_is_exempt_because_it_has_no_session_yet(client):
     """The only exemption, and it must keep working."""
     assert client.post(
@@ -728,18 +794,25 @@ def test_every_rendered_form_carries_a_token(client):
 
     Checked against the templates rather than a rendered page, so forms on
     screens this test never visits are covered too.
-    """
-    import re
-    from pathlib import Path
 
+    Counting tokens per file is not enough and used to be all this did: the
+    sign-out form and its token were both present in base.html, the counts
+    matched, and the token was outside the form where no browser would send it.
+    Each POST form is now checked for a token between its own tags.
+    """
     templates = Path(__file__).resolve().parents[1] / "bms" / "web" / "templates"
     for path in sorted(templates.glob("*.html")):
         if path.name == "login.html":
             continue  # exempt: no session exists yet
         body = path.read_text()
-        forms = body.count('method="post"')
-        tokens = len(re.findall(r'name="\{\{ csrf_field \}\}"', body))
-        assert forms == tokens, f"{path.name}: {forms} POST form(s), {tokens} token(s)"
+        for match in re.finditer(r'<form[^>]*method="post"[^>]*>', body):
+            end = body.find("</form>", match.end())
+            assert end != -1, f"{path.name}: unclosed POST form"
+            inside = body[match.end() : end]
+            assert "csrf_field" in inside, (
+                f"{path.name}: a POST form has no token inside it "
+                f"-- {match.group(0)[:60]}"
+            )
 
 
 def test_the_token_is_not_guessable_from_the_session_id(client):

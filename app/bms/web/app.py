@@ -11,6 +11,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
+from html import escape
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
@@ -58,6 +59,7 @@ from .security import (
     read_session,
     record_failure,
     record_success,
+    verify_dummy,
     verify_password,
 )
 
@@ -213,7 +215,15 @@ def current_admin(user: User = Depends(current_user)) -> User:
 async def _redirect_handler(request: Request, exc: HTTPException):
     if exc.status_code == 303 and "Location" in (exc.headers or {}):
         return RedirectResponse(exc.headers["Location"], status_code=303)
-    return HTMLResponse(f"<h1>{exc.status_code}</h1><p>{exc.detail}</p>", status_code=exc.status_code)
+    # `detail` is not a fixed string: several of them quote back what the user
+    # sent -- a username, a workflow event name, an uploaded filename. Interpolated
+    # raw, that is a reflected script injection, and the page's own CSP allows
+    # inline script, so it would run. Everything the templates render is escaped
+    # by Jinja; this response is built by hand, so it has to escape here.
+    return HTMLResponse(
+        f"<h1>{exc.status_code}</h1><p>{escape(str(exc.detail))}</p>",
+        status_code=exc.status_code,
+    )
 
 
 @app.exception_handler(Exception)
@@ -380,7 +390,13 @@ def login(
                 ),
             )
 
-    user = session.scalar(select(User).where(User.username == username))
+    # Accounts are created with the username stripped, so a stray trailing space
+    # typed into the form used to fail against an account that does exist.
+    user = session.scalar(select(User).where(User.username == username.strip()))
+    if user is None:
+        # Spend the work anyway. Returning early here answered "no such user"
+        # faster than "wrong password", which times the account list out loud.
+        verify_dummy(password)
     if user is None or not verify_password(password, user.password_hash) or not user.active:
         # A disabled account fails identically to a wrong password, so the form
         # cannot be used to discover which accounts exist or are still enabled.
@@ -1208,7 +1224,12 @@ async def admin_import_clients(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    data = await workbook.read()
+    # Bounded like every other upload. This route read the whole body into memory
+    # first and checked nothing, so the limit that protects /cases/{id}/upload
+    # did not apply here at all.
+    data = await _read_bounded(workbook, settings.max_upload_bytes)
+    if data is None:
+        raise HTTPException(status_code=400, detail="That workbook exceeds the maximum upload size.")
     if not data:
         raise HTTPException(status_code=400, detail="No file was uploaded.")
     try:

@@ -85,8 +85,14 @@ form.inline { display: inline; }
       <a href="/audit">Audit</a>
       {% if user.is_admin %}<a href="/admin">Administration</a>{% endif %}
       <span class="muted" style="color:#cfd6e0">{{ user.display_name }}</span>
-      <form method="post" action="/logout" class="inline"><button class="secondary">Sign out</button></form>
+      {# The token has to sit INSIDE the form. It was one line below the closing
+         tag, so the browser sent nothing and every sign-out was refused as a
+         forgery -- the tests missed it because their client attaches the token
+         to any POST regardless of what the page actually contains. #}
+      <form method="post" action="/logout" class="inline">
         <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+        <button class="secondary">Sign out</button>
+      </form>
     {% endif %}
   </nav>
 </header>

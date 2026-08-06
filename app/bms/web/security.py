@@ -12,6 +12,7 @@ data is ever placed in the browser.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -59,6 +60,26 @@ def verify_password(password: str, encoded: str) -> bool:
     except (ValueError, TypeError):
         return False
     return hmac.compare_digest(derived.hex(), expected)
+
+
+@functools.lru_cache(maxsize=1)
+def _absent_user_hash() -> str:
+    """A real hash to check against when the username does not exist.
+
+    Built once, lazily, so importing this module does not cost 240,000 rounds.
+    """
+    return hash_password(secrets.token_urlsafe(16))
+
+
+def verify_dummy(password: str) -> None:
+    """Spend a real verification's work on a username that has no account.
+
+    Verifying costs 240,000 PBKDF2 rounds by design. Skipping it for an unknown
+    username made "no such user" answer measurably sooner than "wrong password",
+    and that difference is enough to enumerate which accounts exist. The result
+    is discarded -- only the elapsed time is the point.
+    """
+    verify_password(password, _absent_user_hash())
 
 
 def _sign(payload: bytes) -> str:
