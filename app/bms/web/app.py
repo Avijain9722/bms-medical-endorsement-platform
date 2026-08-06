@@ -11,15 +11,17 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
+from html import escape
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import pipeline
+from .. import audit, pipeline
 from ..config import settings
 from ..db import create_all, get_session, init_engine
 from .. import logbook, master, scheduler
@@ -58,6 +60,7 @@ from .security import (
     read_session,
     record_failure,
     record_success,
+    verify_dummy,
     verify_password,
 )
 
@@ -65,6 +68,7 @@ logger = logging.getLogger("bms.web")
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+STATIC_DIR = BASE_DIR / "static"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -125,6 +129,12 @@ app = FastAPI(
 )
 
 
+# The stylesheet and the one script. Served as files so they are fetched once
+# and revalidated with a 304, rather than re-sent inside every page, and so the
+# CSP above can refuse inline script outright.
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     """Browser-side defences, on every response.
@@ -141,7 +151,13 @@ async def _security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        # script-src carries no 'unsafe-inline'. With it, any markup that reached
+        # a page could execute -- which is what made the escaping defect in the
+        # error handler a live script injection rather than a display bug. The
+        # platform's only script is served from /static, so nothing needs it.
+        # style-src keeps it: the templates use style attributes for layout, and
+        # a style attribute cannot run script.
+        "default-src 'self'; script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; "
         "base-uri 'none'; object-src 'none'",
@@ -213,7 +229,15 @@ def current_admin(user: User = Depends(current_user)) -> User:
 async def _redirect_handler(request: Request, exc: HTTPException):
     if exc.status_code == 303 and "Location" in (exc.headers or {}):
         return RedirectResponse(exc.headers["Location"], status_code=303)
-    return HTMLResponse(f"<h1>{exc.status_code}</h1><p>{exc.detail}</p>", status_code=exc.status_code)
+    # `detail` is not a fixed string: several of them quote back what the user
+    # sent -- a username, a workflow event name, an uploaded filename. Interpolated
+    # raw, that is a reflected script injection, and the page's own CSP allows
+    # inline script, so it would run. Everything the templates render is escaped
+    # by Jinja; this response is built by hand, so it has to escape here.
+    return HTMLResponse(
+        f"<h1>{exc.status_code}</h1><p>{escape(str(exc.detail))}</p>",
+        status_code=exc.status_code,
+    )
 
 
 @app.exception_handler(Exception)
@@ -345,6 +369,64 @@ def _flags_for(session: Session, case: Case) -> dict[str | None, list[ReviewFlag
     return grouped
 
 
+def _case_context(session: Session, case: Case, user: User, **extra) -> dict:
+    """Everything case_detail.html needs.
+
+    Built in one place because two routes render that page: the case screen, and
+    a refused export re-rendering it with the reason. They had assembled the same
+    six queries separately and had already drifted -- the export path listed
+    exports oldest-first, so the file a user had just tried to produce moved to
+    the bottom of the list exactly when they were looking for it.
+    """
+    flags = _flags_for(session, case)
+    return {
+        "case": case,
+        "members": list(
+            session.scalars(
+                select(Member).where(Member.case_id == case.id).order_by(Member.row_index)
+            )
+        ),
+        "files": list(session.scalars(select(CaseFile).where(CaseFile.case_id == case.id))),
+        "exports": list(
+            session.scalars(
+                select(Export)
+                .where(Export.case_id == case.id)
+                .order_by(Export.created_at.desc())
+            )
+        ),
+        "flags": flags,
+        "case_flags": flags.get(None, []),
+        "blocking": pipeline.blocking_flags(session, case),
+        "user": user,
+        "templates_available": SUPPORTED_KEYS,
+        "severity": Severity,
+        **extra,
+    }
+
+
+def _member_context(session: Session, case: Case, member: Member, user: User, **extra) -> dict:
+    """Everything member.html needs, for the two routes that render it."""
+    return {
+        "case": case,
+        "member": member,
+        "documents": list(
+            session.scalars(select(CaseFile).where(CaseFile.member_id == member.id))
+        ),
+        "flags": list(session.scalars(select(ReviewFlag).where(ReviewFlag.member_id == member.id))),
+        "user": user,
+        "provenance": member.provenance or {},
+        "document_types": [t.value for t in DocumentType],
+        **extra,
+    }
+
+
+def _load_member(session: Session, case: Case, member_id: str) -> Member:
+    member = session.get(Member, member_id)
+    if member is None or member.case_id != case.id:
+        raise HTTPException(status_code=404, detail="Member not found")
+    return member
+
+
 # --------------------------------------------------------------------- auth
 
 
@@ -380,7 +462,13 @@ def login(
                 ),
             )
 
-    user = session.scalar(select(User).where(User.username == username))
+    # Accounts are created with the username stripped, so a stray trailing space
+    # typed into the form used to fail against an account that does exist.
+    user = session.scalar(select(User).where(User.username == username.strip()))
+    if user is None:
+        # Spend the work anyway. Returning early here answered "no such user"
+        # faster than "wrong password", which times the account list out loud.
+        verify_dummy(password)
     if user is None or not verify_password(password, user.password_hash) or not user.active:
         # A disabled account fails identically to a wrong password, so the form
         # cannot be used to discover which accounts exist or are still enabled.
@@ -553,30 +641,7 @@ def case_detail(
     user: User = Depends(current_user),
 ):
     case = _load_case(session, case_id)
-    members = list(
-        session.scalars(select(Member).where(Member.case_id == case.id).order_by(Member.row_index))
-    )
-    files = list(session.scalars(select(CaseFile).where(CaseFile.case_id == case.id)))
-    exports = list(
-        session.scalars(select(Export).where(Export.case_id == case.id).order_by(Export.created_at.desc()))
-    )
-    flags = _flags_for(session, case)
-    blocking = pipeline.blocking_flags(session, case)
-
-    return render(
-        request,
-        "case_detail.html",
-        case=case,
-        members=members,
-        files=files,
-        exports=exports,
-        flags=flags,
-        case_flags=flags.get(None, []),
-        blocking=blocking,
-        user=user,
-        templates_available=SUPPORTED_KEYS,
-        severity=Severity,
-    )
+    return render(request, "case_detail.html", **_case_context(session, case, user))
 
 
 @app.post("/cases/{case_id}/comments")
@@ -587,8 +652,6 @@ def update_comments(
     user: User = Depends(current_user),
 ):
     case = _load_case(session, case_id)
-    from .. import audit
-
     audit.record_field_change(
         session,
         entity_type="case",
@@ -674,23 +737,8 @@ def member_detail(
     user: User = Depends(current_user),
 ):
     case = _load_case(session, case_id)
-    member = session.get(Member, member_id)
-    if member is None or member.case_id != case.id:
-        raise HTTPException(status_code=404, detail="Member not found")
-
-    documents = list(session.scalars(select(CaseFile).where(CaseFile.member_id == member.id)))
-    flags = list(session.scalars(select(ReviewFlag).where(ReviewFlag.member_id == member.id)))
-    return render(
-        request,
-        "member.html",
-        case=case,
-        member=member,
-        documents=documents,
-        flags=flags,
-        user=user,
-        provenance=member.provenance or {},
-        document_types=[t.value for t in DocumentType],
-    )
+    member = _load_member(session, case, member_id)
+    return render(request, "member.html", **_member_context(session, case, member, user))
 
 
 EDITABLE_FIELDS = (
@@ -711,9 +759,7 @@ async def update_member(
     user: User = Depends(current_user),
 ):
     case = _load_case(session, case_id)
-    member = session.get(Member, member_id)
-    if member is None or member.case_id != case.id:
-        raise HTTPException(status_code=404, detail="Member not found")
+    member = _load_member(session, case, member_id)
 
     form = await request.form()
     for field_key in EDITABLE_FIELDS:
@@ -734,25 +780,14 @@ def approve(
     user: User = Depends(current_user),
 ):
     case = _load_case(session, case_id)
-    member = session.get(Member, member_id)
-    if member is None or member.case_id != case.id:
-        raise HTTPException(status_code=404, detail="Member not found")
+    member = _load_member(session, case, member_id)
     try:
         pipeline.approve_member(session, case, member, actor=user.username)
     except PermissionError as error:
-        documents = list(session.scalars(select(CaseFile).where(CaseFile.member_id == member.id)))
-        flags = list(session.scalars(select(ReviewFlag).where(ReviewFlag.member_id == member.id)))
         return render(
             request,
             "member.html",
-            case=case,
-            member=member,
-            documents=documents,
-            flags=flags,
-            user=user,
-            provenance=member.provenance or {},
-            document_types=[t.value for t in DocumentType],
-            error=str(error),
+            **_member_context(session, case, member, user, error=str(error)),
         )
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
@@ -766,8 +801,6 @@ def reclassify(
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    from .. import audit
-
     record = session.get(CaseFile, file_id)
     if record is None or record.case_id != case_id:
         raise HTTPException(status_code=404, detail="File not found")
@@ -810,26 +843,17 @@ def export(
         # on. Only ExportBlocked was handled before; the rest reached the browser
         # as an unexplained 500 -- worst of all StructuralDrift, which is the
         # check that stops a structurally damaged workbook being uploaded.
-        members = list(
-            session.scalars(select(Member).where(Member.case_id == case.id).order_by(Member.row_index))
-        )
-        files = list(session.scalars(select(CaseFile).where(CaseFile.case_id == case.id)))
-        exports = list(session.scalars(select(Export).where(Export.case_id == case.id)))
-        flags = _flags_for(session, case)
+        #
+        # Roll back before rendering. An export writes the portal workbook's row
+        # before it builds the log, so a refusal raised by the log step left the
+        # portal Export recorded against a case whose export never completed --
+        # the session commits on the way out of the request either way. A refused
+        # export must leave no record that it half happened.
+        session.rollback()
         return render(
             request,
             "case_detail.html",
-            case=case,
-            members=members,
-            files=files,
-            exports=exports,
-            flags=flags,
-            case_flags=flags.get(None, []),
-            blocking=pipeline.blocking_flags(session, case),
-            user=user,
-            templates_available=SUPPORTED_KEYS,
-            severity=Severity,
-            error=_explain_refusal(error),
+            **_case_context(session, case, user, error=_explain_refusal(error)),
         )
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
@@ -847,8 +871,6 @@ def download(
     path = ExportStorage(settings).absolute(record.relative_path)
     if not path.exists():
         raise HTTPException(status_code=410, detail="This export has been purged under retention.")
-    from .. import audit
-
     audit.record(
         session,
         action="export.download",
@@ -1006,8 +1028,6 @@ def admin_create_user(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    from .. import audit
-
     if session.scalar(select(User).where(User.username == username.strip())):
         raise HTTPException(status_code=400, detail=f"User {username!r} already exists.")
     if len(password) < 10:
@@ -1041,8 +1061,6 @@ def admin_reset_password(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    from .. import audit
-
     user = session.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1067,8 +1085,6 @@ def admin_create_client(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    from .. import audit
-
     client, created = master.get_or_create_client(session, name.strip(), code=code.strip() or None)
     if created:
         audit.record(
@@ -1110,8 +1126,6 @@ def admin_add_sub_group(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    from .. import audit
-
     client = session.get(Client, client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -1138,8 +1152,6 @@ def admin_add_entity(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    from .. import audit
-
     client = session.get(Client, client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -1172,8 +1184,6 @@ def admin_add_policy(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    from .. import audit
-
     client = session.get(Client, client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -1208,7 +1218,12 @@ async def admin_import_clients(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    data = await workbook.read()
+    # Bounded like every other upload. This route read the whole body into memory
+    # first and checked nothing, so the limit that protects /cases/{id}/upload
+    # did not apply here at all.
+    data = await _read_bounded(workbook, settings.max_upload_bytes)
+    if data is None:
+        raise HTTPException(status_code=400, detail="That workbook exceeds the maximum upload size.")
     if not data:
         raise HTTPException(status_code=400, detail="No file was uploaded.")
     try:
@@ -1383,7 +1398,7 @@ def log_record_event(
         logbook.apply_event(session, entry, event, values, actor=user.username)
     except log_output.NotRecordable as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    return RedirectResponse(request_referer_or("/log"), status_code=303)
+    return RedirectResponse("/log", status_code=303)
 
 
 @app.post("/log/{entry_id}/fields")
@@ -1408,7 +1423,7 @@ def log_update_fields(
         )
     except logbook.NotPermitted as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    return RedirectResponse(request_referer_or("/log"), status_code=303)
+    return RedirectResponse("/log", status_code=303)
 
 
 @app.post("/cases/{case_id}/reopen")
@@ -1422,7 +1437,3 @@ def reopen(
     case = _load_case(session, case_id)
     logbook.reopen_case(session, case, actor=user.username, reason=reason or None)
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
-
-
-def request_referer_or(default: str) -> str:
-    return default

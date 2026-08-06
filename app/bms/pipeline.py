@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import audit
@@ -31,6 +32,7 @@ from .models import (
     ReviewFlag,
     Severity,
     TransactionType,
+    new_id,
 )
 from .ocr.classify import classify
 from .ocr.fields import extract_fields
@@ -42,7 +44,6 @@ from .outputs import recalc as recalc_output
 from .storage import ExportStorage, Storage
 from .templates.specs import SPECS_BY_KEY
 from .validation.rules import (
-    NEWBORN_PLACEHOLDER,
     NO_SURNAME_MARKER,
     check_duplicates,
     check_member,
@@ -78,14 +79,33 @@ class UploadOutcome:
     infected: list[tuple[str, str]] = dataclass_field(default_factory=list)
 
 
+# How many times a colliding reference is re-derived before giving up. A
+# collision needs two cases created in the same instant, so one retry is
+# realistically enough; three costs nothing and covers a burst.
+REFERENCE_ATTEMPTS = 3
+
+
 def next_reference(session: Session) -> str:
-    """Sequential, human-quotable case reference."""
+    """Sequential, human-quotable case reference.
+
+    Derived from the highest reference already issued this year, not from how
+    many rows exist. Counting them repeats a reference as soon as any case is
+    deleted, and `Case.reference` is unique -- so the next case created after a
+    deletion failed on the constraint and the operator got a 500.
+
+    Zero padding to five digits makes the lexical maximum the numeric one.
+    """
     year = date.today().year
     prefix = f"BMS-{year}-"
-    count = session.scalar(
-        select(func.count()).select_from(Case).where(Case.reference.like(f"{prefix}%"))
+    highest = session.scalar(
+        select(func.max(Case.reference)).where(Case.reference.like(f"{prefix}%"))
     )
-    return f"{prefix}{(count or 0) + 1:05d}"
+    previous = 0
+    if highest:
+        suffix = highest.removeprefix(prefix)
+        if suffix.isdigit():
+            previous = int(suffix)
+    return f"{prefix}{previous + 1:05d}"
 
 
 def create_case(
@@ -98,16 +118,27 @@ def create_case(
     bms_comments: str = "",
     **fields,
 ) -> Case:
-    case = Case(
-        reference=next_reference(session),
-        client_name=client_name,
-        insurer=insurer,
-        transaction_type=transaction_type,
-        bms_comments=bms_comments,
-        **fields,
-    )
-    session.add(case)
-    session.flush()
+    # Two operators creating a case in the same instant read the same highest
+    # reference and one of them loses on the unique constraint. Retrying re-reads
+    # it inside a savepoint, so the loser gets the next number instead of a 500.
+    for attempt in range(REFERENCE_ATTEMPTS):
+        case = Case(
+            reference=next_reference(session),
+            client_name=client_name,
+            insurer=insurer,
+            transaction_type=transaction_type,
+            bms_comments=bms_comments,
+            **fields,
+        )
+        try:
+            with session.begin_nested():
+                session.add(case)
+                session.flush()
+            break
+        except IntegrityError:
+            if attempt == REFERENCE_ATTEMPTS - 1:
+                raise
+
     audit.record(
         session,
         action="case.create",
@@ -323,13 +354,40 @@ def analyse_files(
     return files
 
 
-def _identities(session: Session, case: Case) -> list[DocumentIdentity]:
+def _document_evidence(
+    session: Session, case: Case
+) -> tuple[dict[str, CaseFile], dict[str, list[ExtractedField]]]:
+    """Every file on the case and the fields read out of it, in two queries.
+
+    This used to be four times as many round trips as there are documents: the
+    files were selected twice and the fields once per file, twice over, because
+    identity building and member building each did their own loading. A 120
+    document batch -- one large client email -- issued 267 queries to assemble
+    what two statements return.
+
+    The fields are fetched by joining through the case rather than by an IN list
+    of file ids, so a batch larger than the driver's parameter limit still works.
+    """
+    files = {
+        record.id: record
+        for record in session.scalars(select(CaseFile).where(CaseFile.case_id == case.id))
+    }
+    fields: dict[str, list[ExtractedField]] = {file_id: [] for file_id in files}
+    for field in session.scalars(
+        select(ExtractedField)
+        .join(CaseFile, ExtractedField.file_id == CaseFile.id)
+        .where(CaseFile.case_id == case.id)
+    ):
+        fields.setdefault(field.file_id, []).append(field)
+    return files, fields
+
+
+def _identities(
+    file_by_id: dict[str, CaseFile], field_by_file: dict[str, list[ExtractedField]]
+) -> list[DocumentIdentity]:
     identities = []
-    files = session.scalars(select(CaseFile).where(CaseFile.case_id == case.id)).all()
-    for record in files:
-        fields = session.scalars(
-            select(ExtractedField).where(ExtractedField.file_id == record.id)
-        ).all()
+    for record in file_by_id.values():
+        fields = field_by_file.get(record.id, [])
         identifiers = {
             f.field_key: f.normalised_value
             for f in fields
@@ -393,17 +451,8 @@ def build_members(
             )
         )
 
-    groups, unassigned = group_documents(groups, _identities(session, case))
-
-    file_by_id = {
-        record.id: record
-        for record in session.scalars(select(CaseFile).where(CaseFile.case_id == case.id))
-    }
-    field_by_file: dict[str, list[ExtractedField]] = {}
-    for record in file_by_id.values():
-        field_by_file[record.id] = list(
-            session.scalars(select(ExtractedField).where(ExtractedField.file_id == record.id))
-        )
+    file_by_id, field_by_file = _document_evidence(session, case)
+    groups, unassigned = group_documents(groups, _identities(file_by_id, field_by_file))
 
     effective_date, effective_reason = resolve_effective_date(
         case.transaction_type,
@@ -414,6 +463,10 @@ def build_members(
     members: list[Member] = []
     for index, group in enumerate(groups):
         member = Member(
+            # Assigned here rather than by the flush, so a member's documents can
+            # be pointed at it without a round trip per member. This loop used to
+            # flush inside itself for exactly that id.
+            id=new_id(),
             case_id=case.id,
             row_index=index,
             transaction_type=case.transaction_type,
@@ -441,7 +494,7 @@ def build_members(
             record = file_by_id.get(file_id)
             if record is None:
                 continue
-            record.member_id = None  # set after flush, member has no id yet
+            record.member_id = None  # cleared, then re-pointed below
             for field in field_by_file.get(file_id, []):
                 if field.field_key not in MEMBER_FIELD_KEYS or not field.normalised_value:
                     continue
@@ -467,7 +520,6 @@ def build_members(
             member.last_name = NO_SURNAME_MARKER
 
         session.add(member)
-        session.flush()
 
         for file_id in group.file_ids:
             record = file_by_id.get(file_id)
@@ -476,6 +528,7 @@ def build_members(
 
         members.append(member)
 
+    # One flush for the whole batch rather than one per member.
     session.flush()
 
     _link_principals(session, groups, members)
@@ -810,14 +863,21 @@ def export_case(
     # --- portal workbook -----------------------------------------------------
     suffix = ".xlsx"
     portal_path = work_dir / f"{case.reference}-portal{suffix}"
-    built = nas_output.generate_workbook(
-        template_key,
-        approved,
-        repo_root=config.template_root,
-        output=portal_path,
-        attachments=attachments,
-    )
-    portal_bytes = portal_path.read_bytes()
+    try:
+        built = nas_output.generate_workbook(
+            template_key,
+            approved,
+            repo_root=config.template_root,
+            output=portal_path,
+            attachments=attachments,
+        )
+        portal_bytes = portal_path.read_bytes()
+    finally:
+        # The workbook is only staged here on the way to export storage, which
+        # holds the copy that matters. Left behind, every case ever exported kept
+        # a scratch copy in var/tmp for the life of the installation -- and the
+        # retention purge does not look in that directory.
+        portal_path.unlink(missing_ok=True)
     portal_name = f"{case.reference}-{template_key}{suffix}"
     relative, digest = export_storage.write(case.reference, portal_name, portal_bytes)
     portal_recalc = recalc_output.recalculate(
@@ -867,8 +927,11 @@ def export_case(
         session.flush()
 
     log_path = work_dir / f"{case.reference}-log.xlsx"
-    log_result = log_output.export(entries, repo_root=config.template_root, output=log_path)
-    log_bytes = log_path.read_bytes()
+    try:
+        log_result = log_output.export(entries, repo_root=config.template_root, output=log_path)
+        log_bytes = log_path.read_bytes()
+    finally:
+        log_path.unlink(missing_ok=True)
     log_name = f"{case.reference}-New-Log-Format-2026.xlsx"
     log_relative, log_digest = export_storage.write(case.reference, log_name, log_bytes)
     log_recalc = recalc_output.recalculate(
@@ -984,14 +1047,22 @@ def purge_closed_cases(
             continue
 
         files = list(session.scalars(select(CaseFile).where(CaseFile.case_id == case.id)))
+        # Which of this case's blobs another case still references. One query for
+        # the case, rather than a COUNT per file -- a purge sweep clearing a
+        # day's closed cases ran one round trip per document across all of them.
+        still_referenced = set(
+            session.scalars(
+                select(CaseFile.sha256)
+                .where(
+                    CaseFile.sha256.in_([record.sha256 for record in files]),
+                    CaseFile.case_id != case.id,
+                )
+                .distinct()
+            )
+        )
         for record in files:
             # Only drop the blob when no other case still references it.
-            others = session.scalar(
-                select(func.count())
-                .select_from(CaseFile)
-                .where(CaseFile.sha256 == record.sha256, CaseFile.case_id != case.id)
-            )
-            if not others:
+            if record.sha256 not in still_referenced:
                 storage.delete(record.sha256)
             record.status = FileStatus.PURGED.value
             record.extracted_text = None

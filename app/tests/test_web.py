@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import io
 import itertools
+import re
 import sys
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -522,6 +524,88 @@ def test_every_export_refusal_is_explained_not_a_500(client, monkeypatch, except
     assert "Traceback" not in response.text
 
 
+def test_a_refusal_partway_through_leaves_no_half_export(client, monkeypatch):
+    """The portal workbook is recorded before the log is built.
+
+    So a refusal raised by the log step used to commit an Export row for a case
+    whose export never completed -- the request's session commits on the way out
+    regardless of what the route rendered. A refused export must leave nothing
+    behind but the reason.
+    """
+    from bms.models import Export
+    from bms.registry.generate import StructuralDrift
+
+    case_id = _approved_case(client)
+
+    def write_the_portal_row_then_refuse(session, case, **kwargs):
+        """Exactly the shape of the real thing: portal recorded, log refuses."""
+        session.add(
+            Export(
+                case_id=case.id,
+                kind="portal",
+                filename="half.xlsx",
+                relative_path="x/half.xlsx",
+                sha256="0" * 64,
+            )
+        )
+        session.flush()
+        raise StructuralDrift("bms.log.2026", ["header row moved"])
+
+    monkeypatch.setattr("bms.web.app.pipeline.export_case", write_the_portal_row_then_refuse)
+    refused = client.post(
+        f"/cases/{case_id}/export", data={"template_key": "nas.addition.aldar.v1"}
+    )
+    assert refused.status_code == 200
+    assert "no longer matches the master" in refused.text
+
+    with db.session_scope() as session:
+        recorded = session.scalars(select(Export).where(Export.case_id == case_id)).all()
+    assert recorded == [], f"a refused export recorded {len(recorded)} file(s)"
+
+
+def test_a_refused_export_shows_the_case_screen_the_case_screen_shows(client, monkeypatch):
+    """The two routes that render case_detail.html had drifted apart.
+
+    Each assembled the page's context separately, and the refusal path had lost
+    the ordering: it listed exports oldest-first, so the file the operator had
+    just tried to produce dropped to the bottom of the list at exactly the moment
+    they were looking for it. Both now build the context in one place.
+    """
+    from bms.models import Export
+
+    case_id = _approved_case(client)
+    with db.session_scope() as session:
+        for index, name in enumerate(["first.xlsx", "second.xlsx", "third.xlsx"]):
+            session.add(
+                Export(
+                    case_id=case_id,
+                    kind="portal",
+                    filename=name,
+                    relative_path=f"x/{name}",
+                    sha256="0" * 64,
+                    created_at=datetime(2026, 1, 1 + index, tzinfo=timezone.utc),
+                )
+            )
+
+    def refuse(*args, **kwargs):
+        raise web_app.pipeline.ExportBlocked("nothing approved")
+
+    monkeypatch.setattr("bms.web.app.pipeline.export_case", refuse)
+    refused = client.post(
+        f"/cases/{case_id}/export", data={"template_key": "nas.addition.aldar.v1"}
+    )
+    shown = client.get(f"/cases/{case_id}")
+
+    names = ("first.xlsx", "second.xlsx", "third.xlsx")
+
+    def order(page: str) -> list[str]:
+        """The filenames in the order the page actually puts them in."""
+        assert all(name in page for name in names)
+        return sorted(names, key=page.index)
+
+    assert order(refused.text) == order(shown.text) == ["third.xlsx", "second.xlsx", "first.xlsx"]
+
+
 def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkeypatch):
     """A traceback in the page would disclose paths, versions and query text."""
     import re
@@ -541,6 +625,52 @@ def test_an_unexpected_error_gives_a_reference_and_no_stack_trace(client, monkey
     assert "Traceback" not in response.text
     assert "RuntimeError" not in response.text
     assert re.search(r"<code>[0-9a-f]{12}</code>", response.text), "a reference to quote"
+
+
+def test_an_error_message_never_reflects_input_as_live_markup(client):
+    """Several 400s quote back what the user sent, and that page is hand-built.
+
+    The templates are escaped by Jinja, but this response is assembled as a
+    string, so an unescaped detail is a reflected script injection -- and the
+    page's own CSP permits inline script, so it would execute rather than merely
+    render. Here the attacker's channel is the username field.
+    """
+    sign_in(client)
+    with db.session_scope() as session:
+        session.scalar(select(User).where(User.username == "tester")).is_admin = True
+
+    payload = "<script>alert('xss')</script>"
+    form = {"username": payload, "display_name": "x", "password": "password123"}
+    assert client.post("/admin/users", data=form).status_code == 303
+
+    reflected = client.post("/admin/users", data=form)
+    assert reflected.status_code == 400
+    assert payload not in reflected.text, "the raw script tag reached the browser"
+    assert "&lt;script&gt;" in reflected.text, "it should be shown, escaped"
+
+
+def test_an_administrator_import_is_bounded_like_every_other_upload(client, monkeypatch):
+    """This route read the whole body first and checked the size never.
+
+    The limit that protects /cases/{id}/upload did not apply here at all, so one
+    oversized workbook was fully resident in memory before anything looked at it.
+    """
+    sign_in(client)
+    with db.session_scope() as session:
+        session.scalar(select(User).where(User.username == "tester")).is_admin = True
+    import dataclasses
+
+    # Settings is frozen by design, so swap the object rather than mutate it.
+    monkeypatch.setattr(
+        web_app, "settings", dataclasses.replace(web_app.settings, max_upload_bytes=1024)
+    )
+
+    response = client.post(
+        "/admin/clients/import",
+        files={"workbook": ("big.xlsx", io.BytesIO(b"x" * 5000), "application/vnd.ms-excel")},
+    )
+    assert response.status_code == 400
+    assert "maximum upload size" in response.text
 
 
 # --------------------------------------------------- hardening and efficiency
@@ -613,6 +743,44 @@ def test_every_response_carries_the_browser_defences(client):
         assert "default-src 'self'" in policy
         assert "frame-ancestors 'none'" in policy
         assert "object-src 'none'" in policy
+
+
+def test_the_policy_refuses_inline_script(client):
+    """With 'unsafe-inline' on script-src, any markup that reaches a page runs.
+
+    That is what turned an unescaped error message into a live script injection
+    rather than a display bug. Nothing needs the relaxation: the platform's only
+    script is served from /static.
+    """
+    policy = client.get("/login").headers["Content-Security-Policy"]
+    script_src = next(d for d in policy.split(";") if d.strip().startswith("script-src"))
+    assert "unsafe-inline" not in script_src, script_src
+
+
+def test_no_page_carries_inline_script_the_policy_would_block(client):
+    """A page written with an inline <script> or an on* handler is now dead code
+    in the browser, and would fail silently rather than loudly."""
+    templates = Path(__file__).resolve().parents[1] / "bms" / "web" / "templates"
+    for path in sorted(templates.glob("*.html")):
+        body = path.read_text()
+        assert "<script>" not in body, f"{path.name}: inline script the CSP blocks"
+        assert not re.search(r"\son[a-z]+=", body), f"{path.name}: inline event handler"
+
+
+def test_the_stylesheet_and_script_are_served_and_revalidate(client):
+    """Served as files rather than re-sent inside every page.
+
+    The stylesheet was 3.3 KB of identical bytes on all eleven screens; as a file
+    the browser fetches it once and revalidates with a 304 after that.
+    """
+    for asset, kind in (("/static/bms.css", "css"), ("/static/case_new.js", "javascript")):
+        first = client.get(asset)
+        assert first.status_code == 200
+        assert kind in first.headers["content-type"]
+        assert first.headers.get("etag"), "no etag, so the browser cannot revalidate"
+
+        again = client.get(asset, headers={"If-None-Match": first.headers["etag"]})
+        assert again.status_code == 304, "a repeat visit re-downloads the whole file"
 
 
 def test_hsts_is_only_sent_when_the_cookie_is_secure(client):
@@ -716,6 +884,25 @@ def test_signing_out_is_protected_too(client):
     assert client.post("/logout").status_code == 303
 
 
+def test_signing_out_works_with_only_what_the_page_actually_contains(client):
+    """The regression the counting test below could not see.
+
+    BrowserClient attaches a token to every POST, so it proves the guard accepts
+    a token -- not that the rendered page carries one where the browser will find
+    it. The hidden field sat one line outside the sign-out form, so a real
+    browser submitted nothing and every sign-out was refused as a forgery. This
+    submits exactly the fields inside that form and nothing else.
+    """
+    sign_in(client)
+    page = client.get("/").text
+    form = re.search(r'<form[^>]*action="/logout".*?</form>', page, re.S)
+    assert form, "the sign-out form is not on the page at all"
+    fields = dict(
+        re.findall(r'<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"', form.group(0))
+    )
+    assert client.post("/logout", data=fields, csrf=False).status_code == 303
+
+
 def test_login_is_exempt_because_it_has_no_session_yet(client):
     """The only exemption, and it must keep working."""
     assert client.post(
@@ -728,18 +915,25 @@ def test_every_rendered_form_carries_a_token(client):
 
     Checked against the templates rather than a rendered page, so forms on
     screens this test never visits are covered too.
-    """
-    import re
-    from pathlib import Path
 
+    Counting tokens per file is not enough and used to be all this did: the
+    sign-out form and its token were both present in base.html, the counts
+    matched, and the token was outside the form where no browser would send it.
+    Each POST form is now checked for a token between its own tags.
+    """
     templates = Path(__file__).resolve().parents[1] / "bms" / "web" / "templates"
     for path in sorted(templates.glob("*.html")):
         if path.name == "login.html":
             continue  # exempt: no session exists yet
         body = path.read_text()
-        forms = body.count('method="post"')
-        tokens = len(re.findall(r'name="\{\{ csrf_field \}\}"', body))
-        assert forms == tokens, f"{path.name}: {forms} POST form(s), {tokens} token(s)"
+        for match in re.finditer(r'<form[^>]*method="post"[^>]*>', body):
+            end = body.find("</form>", match.end())
+            assert end != -1, f"{path.name}: unclosed POST form"
+            inside = body[match.end() : end]
+            assert "csrf_field" in inside, (
+                f"{path.name}: a POST form has no token inside it "
+                f"-- {match.group(0)[:60]}"
+            )
 
 
 def test_the_token_is_not_guessable_from_the_session_id(client):
@@ -751,3 +945,40 @@ def test_the_token_is_not_guessable_from_the_session_id(client):
     assert cookie not in token
     assert len(token) == 64
     assert csrf_token(cookie + "x") != token
+
+
+def test_the_login_throttle_cannot_be_used_to_exhaust_memory(client):
+    """The tracking must not become the denial of service it prevents.
+
+    Every distinct username tried creates an entry and the attacker chooses the
+    usernames, so an unbounded table is memory exhaustion by unauthenticated
+    request. Measured at 50,000 distinct names before the cap existed.
+    """
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for index in range(security.MAX_TRACKED_KEYS * 3):
+            security.record_failure(f"user:flood-{index}")
+        assert len(security._failures) <= security.MAX_TRACKED_KEYS
+    finally:
+        security.reset_throttle()
+
+
+def test_a_real_lockout_survives_a_flood_of_other_names(client):
+    """Eviction must not become a way to clear your own lockout."""
+    from bms.web import security
+
+    security.reset_throttle()
+    try:
+        for _ in range(security.FAILURE_LIMIT):
+            security.record_failure("user:victim")
+        assert security.locked_out("user:victim") > 0
+
+        for index in range(security.MAX_TRACKED_KEYS * 3):
+            security.record_failure(f"user:noise-{index}")
+
+        assert security.locked_out("user:victim") > 0, "a lockout must not be evictable"
+        assert len(security._failures) <= security.MAX_TRACKED_KEYS
+    finally:
+        security.reset_throttle()

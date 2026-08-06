@@ -24,6 +24,27 @@ Write-Host "    $version"
 python -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)"
 if ($LASTEXITCODE -ne 0) { throw 'Python 3.11 or newer is required' }
 
+# The offline bundle holds compiled packages built for one specific Python
+# version. pip's own message for a mismatch ("no matching distribution") does not
+# say why, so check it here and say so plainly.
+$wheelsPath = Join-Path $here 'wheelhouse'
+if (Test-Path $wheelsPath) {
+    $bundled = Get-ChildItem $wheelsPath -Filter '*win_amd64.whl' |
+        ForEach-Object { if ($_.Name -match 'cp3(\d+)') { "3.$($Matches[1])" } } |
+        Sort-Object -Unique
+    $running = & python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    if ($bundled -and ($bundled -notcontains $running)) {
+        Write-Host ''
+        Write-Host "  This offline bundle is built for Python $($bundled -join ', ')." -ForegroundColor Yellow
+        Write-Host "  You are running Python $running." -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host "  Install Python $($bundled[0]) from python.org (tick 'Add Python to PATH'),"
+        Write-Host '  or ask for a bundle rebuilt for your version.'
+        Write-Host ''
+        throw "Python $($bundled[0]) is required by this bundle"
+    }
+}
+
 Write-Host '==> Virtual environment'
 if (-not (Test-Path '.venv')) { python -m venv .venv }
 

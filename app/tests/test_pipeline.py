@@ -23,7 +23,6 @@ from bms.models import (  # noqa: E402
     LogEntry,
     Member,
     ReviewFlag,
-    Severity,
     User,
 )
 from bms.ocr.text import PlainTextFile, TextPipeline  # noqa: E402
@@ -313,6 +312,91 @@ def test_full_addition_export_produces_both_workbooks(session, user, env):
     storage = ExportStorage(env)
     assert storage.absolute(portal.relative_path).exists()
     assert storage.absolute(log.relative_path).exists()
+
+    # Both workbooks are staged in var/tmp on the way to export storage. They
+    # used to be left there, so every case ever exported kept a scratch copy for
+    # the life of the installation -- and the retention purge does not look in
+    # that directory.
+    leftovers = sorted(p.name for p in (env.data_root / "tmp").glob("*"))
+    assert leftovers == [], f"scratch files left behind: {leftovers}"
+
+
+def test_reprocessing_does_not_query_once_per_document(session, user, env):
+    """It used to issue four round trips per file, and nothing capped the count.
+
+    The files were selected twice and their fields once per file, twice over,
+    because identity building and member building each loaded their own copy. A
+    120-document batch -- one large client email -- took 267 queries to assemble
+    what two statements return. The count must not scale with the batch.
+    """
+    from sqlalchemy import event
+
+    visa = "RESIDENCE VISA\nStaff ID: {sid}\nU.I.D No: 5862089{i}\n"
+
+    def queries_for(document_count: int) -> int:
+        case = make_case(session, user, env, instruction="Kindly add the below.")
+        for index in range(document_count):
+            pipeline.add_upload(
+                session, case, f"Visa{index}.txt",
+                visa.format(sid=80000 + index, i=index % 10).encode(), actor=user.username,
+            )
+        pipeline.analyse_files(
+            session, case, actor=user.username, pipeline=text_only_pipeline()
+        )
+        session.flush()
+
+        counted = 0
+
+        def count(*args, **kwargs):
+            nonlocal counted
+            counted += 1
+
+        engine = db.get_engine()
+        event.listen(engine, "before_cursor_execute", count)
+        try:
+            pipeline.build_members(session, case, actor=user.username)
+        finally:
+            event.remove(engine, "before_cursor_execute", count)
+        return counted
+
+    few = queries_for(4)
+    many = queries_for(40)
+    assert few == many, f"{few} queries for 4 documents, {many} for 40 -- it scales with the batch"
+
+
+def test_a_reference_is_not_reissued_after_a_case_is_deleted(session, user, env):
+    """`Case.reference` is unique, so a repeated one is a 500 in front of a user.
+
+    Deriving the next number from a row count -- rather than from the highest
+    reference already issued -- repeats the last one as soon as any case is
+    removed, and the very next case created then fails on the constraint.
+    """
+    prefix = f"BMS-{date.today().year}-"
+    first = make_case(session, user, env)
+    second = make_case(session, user, env)
+    assert [first.reference, second.reference] == [f"{prefix}00001", f"{prefix}00002"]
+
+    session.delete(first)
+    session.flush()
+
+    third = make_case(session, user, env)
+    assert third.reference == f"{prefix}00003"
+
+
+def test_a_reference_collision_is_retried_rather_than_raised(session, user, env, monkeypatch):
+    """Two operators creating a case in the same instant read the same number."""
+    prefix = f"BMS-{date.today().year}-"
+    taken = make_case(session, user, env).reference
+
+    # Hand back the number already used, as a racing second process would.
+    stale = iter([taken, taken])
+    real = pipeline.next_reference
+    monkeypatch.setattr(
+        pipeline, "next_reference", lambda active: next(stale, None) or real(active)
+    )
+
+    recovered = make_case(session, user, env)
+    assert recovered.reference == f"{prefix}00002"
 
 
 def test_export_is_blocked_while_a_critical_flag_is_open(session, user, env):

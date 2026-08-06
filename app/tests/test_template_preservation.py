@@ -26,8 +26,6 @@ from bms.registry.generate import (  # noqa: E402
     generate,
 )
 from bms.templates.specs import (  # noqa: E402
-    ADNIC_ENROLMENT,
-    ADNIC_TERMINATION,
     ALL_SPECS,
     BMS_LOG,
     DAMAN_ADDITION,
@@ -35,7 +33,6 @@ from bms.templates.specs import (  # noqa: E402
     NAS_ALDAR_ADDITION,
     NAS_DELETION,
     NAS_HR_ADDITION,
-    SUKOON_ADDITION,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

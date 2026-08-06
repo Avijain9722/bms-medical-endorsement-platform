@@ -262,10 +262,18 @@ def export_range(
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"New-Log-Format-2026_{criteria.slug()}_{stamp}.xlsx"
     temporary = work_dir / filename
-    result = log_output.export(entries, repo_root=config.template_root, output=temporary)
+    try:
+        result = log_output.export(entries, repo_root=config.template_root, output=temporary)
+        generated = Path(temporary).read_bytes()
+    finally:
+        # The filename carries a timestamp, so without this every log export a
+        # user ever ran left its own scratch copy in var/tmp forever. The purge
+        # does not clean that directory, and this is the most-used export there
+        # is.
+        temporary.unlink(missing_ok=True)
 
     storage = ExportStorage(config)
-    relative, digest = storage.write("_log", filename, Path(temporary).read_bytes())
+    relative, digest = storage.write("_log", filename, generated)
 
     audit.record(
         session,

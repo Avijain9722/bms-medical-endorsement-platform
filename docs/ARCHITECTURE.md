@@ -261,8 +261,14 @@ it for companies the operator was not going to choose. Now the page carries only
 company names and fetches one company's sub-groups, entities and policies on
 selection — **1.3 KB, constant.**
 
-Both are held by tests that assert the page stays bounded as rows are added, so
-the next feature cannot quietly reintroduce the problem.
+**The stylesheet** was inlined into every page — 3.3 KB of identical bytes on
+all eleven screens, re-sent on every navigation. It is now a file the browser
+fetches once and revalidates with a 304. Measured across four representative
+pages: **23,957 bytes of HTML before, 9,238 after**, plus 5,564 bytes of assets
+fetched once.
+
+All three are held by tests that assert the page stays bounded as rows are
+added, so the next feature cannot quietly reintroduce the problem.
 
 ## 4c. Where the time goes
 
@@ -291,7 +297,32 @@ grows. Indexed, each is an index scan.
 **Uploads** were read whole into memory and size-checked afterwards, so the
 limit could not prevent what it existed to prevent — a body of any size was
 fully resident before anything rejected it. Reading now stops at the first chunk
-that crosses the limit, bounding peak memory by the limit itself.
+that crosses the limit, bounding peak memory by the limit itself. The
+administrator client-master import was doing the same thing and is now bounded
+the same way.
+
+**Reprocessing a case** loaded its documents four times: identity building and
+member building each selected the files and then their extracted fields once per
+file, and the member loop flushed once per member to obtain an id it could have
+generated itself. Everything is now loaded in two statements and flushed once.
+
+| Documents in the batch | Before | After |
+| ---: | --- | --- |
+| 20 | 67 queries, 29.8 ms | **9 queries, 18.3 ms** |
+| 60 | 147 queries, 54.1 ms | **9 queries, 26.7 ms** |
+| 120 | 267 queries, 95.3 ms | **9 queries, 37.6 ms** |
+
+The count is flat: it no longer depends on how many documents a client attached
+or how many members they resolve to. A test holds that property.
+
+That consolidation reads the fields by joining through the case rather than by
+an id list, which needs `extracted_fields.file_id` indexed — the one foreign key
+the indexing pass above missed, and the busiest, since that table grows with
+every document ever uploaded and is never purged. On 24,000 rows: full scan
+5.63 ms, index search **0.140 ms**.
+
+**The retention purge** asked, once per file, whether any other case still
+referenced that blob. It now asks once per case.
 
 ## 5. Security posture
 
@@ -303,6 +334,8 @@ that crosses the limit, bounding peak memory by the limit itself.
 | Uploads | Virus-scanned before extraction. Infected files never reach storage. An absent scanner reports `unavailable`, never `clean` |
 | Archives | Zip-slip and zip-bomb guarded, with configurable member and size limits |
 | CSRF | Every state-changing request carries a token derived from the session — `HMAC(secret, session-cookie)`. No second cookie and no server-side store: it is stable per session, unique per session, unguessable without the signing key, and worthless once the session ends. Enforced as a global dependency, so a route added later is protected by default. Only `/login` is exempt, because no session exists yet to derive one from |
+| Output escaping | Templates are escaped by Jinja. The one response built by hand — the HTTP error page — escapes its detail explicitly, because several details quote the request back (a username, a workflow event name, a filename) |
+| Content-Security-Policy | `script-src 'self'` with **no** `unsafe-inline`, so markup that reaches a page cannot execute; the platform's only script is served from `/static`. `style-src` keeps `unsafe-inline` for layout style attributes, which cannot run script. Held by a test that also refuses any inline `<script>` or `on*` handler in a template |
 | Authorisation | One operational role. Administrators additionally manage accounts and the client master. No role can override a critical error |
 | Retention | Documents purged 36 hours after closure; records and audit trail kept indefinitely |
 | Audit | Append-only, no edit or delete path, never purged |
