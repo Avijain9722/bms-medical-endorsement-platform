@@ -23,7 +23,6 @@ from bms.models import (  # noqa: E402
     LogEntry,
     Member,
     ReviewFlag,
-    Severity,
     User,
 )
 from bms.ocr.text import PlainTextFile, TextPipeline  # noqa: E402
@@ -313,6 +312,48 @@ def test_full_addition_export_produces_both_workbooks(session, user, env):
     storage = ExportStorage(env)
     assert storage.absolute(portal.relative_path).exists()
     assert storage.absolute(log.relative_path).exists()
+
+    # Both workbooks are staged in var/tmp on the way to export storage. They
+    # used to be left there, so every case ever exported kept a scratch copy for
+    # the life of the installation -- and the retention purge does not look in
+    # that directory.
+    leftovers = sorted(p.name for p in (env.data_root / "tmp").glob("*"))
+    assert leftovers == [], f"scratch files left behind: {leftovers}"
+
+
+def test_a_reference_is_not_reissued_after_a_case_is_deleted(session, user, env):
+    """`Case.reference` is unique, so a repeated one is a 500 in front of a user.
+
+    Deriving the next number from a row count -- rather than from the highest
+    reference already issued -- repeats the last one as soon as any case is
+    removed, and the very next case created then fails on the constraint.
+    """
+    prefix = f"BMS-{date.today().year}-"
+    first = make_case(session, user, env)
+    second = make_case(session, user, env)
+    assert [first.reference, second.reference] == [f"{prefix}00001", f"{prefix}00002"]
+
+    session.delete(first)
+    session.flush()
+
+    third = make_case(session, user, env)
+    assert third.reference == f"{prefix}00003"
+
+
+def test_a_reference_collision_is_retried_rather_than_raised(session, user, env, monkeypatch):
+    """Two operators creating a case in the same instant read the same number."""
+    prefix = f"BMS-{date.today().year}-"
+    taken = make_case(session, user, env).reference
+
+    # Hand back the number already used, as a racing second process would.
+    stale = iter([taken, taken])
+    real = pipeline.next_reference
+    monkeypatch.setattr(
+        pipeline, "next_reference", lambda active: next(stale, None) or real(active)
+    )
+
+    recovered = make_case(session, user, env)
+    assert recovered.reference == f"{prefix}00002"
 
 
 def test_export_is_blocked_while_a_critical_flag_is_open(session, user, env):

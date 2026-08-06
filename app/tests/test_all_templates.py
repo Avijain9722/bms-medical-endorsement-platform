@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bms.ooxml.package import M, OoxmlPackage  # noqa: E402
 from bms.ooxml.sheet import sheet_part_names  # noqa: E402
 from bms.outputs import portal  # noqa: E402
-from bms.outputs.bindings import ALL_BINDINGS, BY_TEMPLATE  # noqa: E402
+from bms.outputs.bindings import ALL_BINDINGS  # noqa: E402
 from bms.outputs.mapping import UnsupportedValue, for_template as value_map_for  # noqa: E402
 from bms.templates.specs import SPECS_BY_KEY  # noqa: E402
 

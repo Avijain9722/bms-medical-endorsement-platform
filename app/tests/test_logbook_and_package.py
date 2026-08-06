@@ -12,7 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import BrowserClient  # noqa: E402
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,7 +26,6 @@ from bms.models import (  # noqa: E402
     DocumentType,
     Export,
     LogEntry,
-    Member,
     User,
 )
 from bms.ocr.text import PlainTextFile, TextPipeline  # noqa: E402
@@ -313,6 +311,13 @@ def test_range_export_writes_the_approved_workbook(session, user, env):
 
     event = session.scalar(select(AuditEvent).where(AuditEvent.action == "log.export"))
     assert event is not None
+
+    # The workbook is staged in var/tmp under a timestamped name before being
+    # written to export storage. Left there, every log export a user ever ran
+    # kept its own copy forever -- and the retention purge does not clean that
+    # directory. This is the most frequently used export in the platform.
+    leftovers = sorted(p.name for p in (env.data_root / "tmp").glob("*"))
+    assert leftovers == [], f"scratch files left behind: {leftovers}"
 
 
 def test_range_export_carries_recorded_values_through(session, user, env):

@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bms import db, master  # noqa: E402
 from bms.config import Settings  # noqa: E402
-from bms.models import AuditEvent, Base, Case, Client, ClientPolicy, LegalEntity, SubGroup, User  # noqa: E402
+from bms.models import AuditEvent, Base, Case, Client, User  # noqa: E402
 from bms.web import app as web_app  # noqa: E402
 from bms.web.security import hash_password  # noqa: E402
 
@@ -407,7 +407,6 @@ def test_a_case_needs_a_client_from_somewhere(client):
 
 def test_sub_group_emirate_drives_the_deletion_date(client):
     """Registered configuration, not text inference, decides the Dubai rule."""
-    from datetime import date, timedelta
 
     from bms import pipeline
 

@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import audit
@@ -42,7 +43,6 @@ from .outputs import recalc as recalc_output
 from .storage import ExportStorage, Storage
 from .templates.specs import SPECS_BY_KEY
 from .validation.rules import (
-    NEWBORN_PLACEHOLDER,
     NO_SURNAME_MARKER,
     check_duplicates,
     check_member,
@@ -78,14 +78,33 @@ class UploadOutcome:
     infected: list[tuple[str, str]] = dataclass_field(default_factory=list)
 
 
+# How many times a colliding reference is re-derived before giving up. A
+# collision needs two cases created in the same instant, so one retry is
+# realistically enough; three costs nothing and covers a burst.
+REFERENCE_ATTEMPTS = 3
+
+
 def next_reference(session: Session) -> str:
-    """Sequential, human-quotable case reference."""
+    """Sequential, human-quotable case reference.
+
+    Derived from the highest reference already issued this year, not from how
+    many rows exist. Counting them repeats a reference as soon as any case is
+    deleted, and `Case.reference` is unique -- so the next case created after a
+    deletion failed on the constraint and the operator got a 500.
+
+    Zero padding to five digits makes the lexical maximum the numeric one.
+    """
     year = date.today().year
     prefix = f"BMS-{year}-"
-    count = session.scalar(
-        select(func.count()).select_from(Case).where(Case.reference.like(f"{prefix}%"))
+    highest = session.scalar(
+        select(func.max(Case.reference)).where(Case.reference.like(f"{prefix}%"))
     )
-    return f"{prefix}{(count or 0) + 1:05d}"
+    previous = 0
+    if highest:
+        suffix = highest.removeprefix(prefix)
+        if suffix.isdigit():
+            previous = int(suffix)
+    return f"{prefix}{previous + 1:05d}"
 
 
 def create_case(
@@ -98,16 +117,27 @@ def create_case(
     bms_comments: str = "",
     **fields,
 ) -> Case:
-    case = Case(
-        reference=next_reference(session),
-        client_name=client_name,
-        insurer=insurer,
-        transaction_type=transaction_type,
-        bms_comments=bms_comments,
-        **fields,
-    )
-    session.add(case)
-    session.flush()
+    # Two operators creating a case in the same instant read the same highest
+    # reference and one of them loses on the unique constraint. Retrying re-reads
+    # it inside a savepoint, so the loser gets the next number instead of a 500.
+    for attempt in range(REFERENCE_ATTEMPTS):
+        case = Case(
+            reference=next_reference(session),
+            client_name=client_name,
+            insurer=insurer,
+            transaction_type=transaction_type,
+            bms_comments=bms_comments,
+            **fields,
+        )
+        try:
+            with session.begin_nested():
+                session.add(case)
+                session.flush()
+            break
+        except IntegrityError:
+            if attempt == REFERENCE_ATTEMPTS - 1:
+                raise
+
     audit.record(
         session,
         action="case.create",
@@ -810,14 +840,21 @@ def export_case(
     # --- portal workbook -----------------------------------------------------
     suffix = ".xlsx"
     portal_path = work_dir / f"{case.reference}-portal{suffix}"
-    built = nas_output.generate_workbook(
-        template_key,
-        approved,
-        repo_root=config.template_root,
-        output=portal_path,
-        attachments=attachments,
-    )
-    portal_bytes = portal_path.read_bytes()
+    try:
+        built = nas_output.generate_workbook(
+            template_key,
+            approved,
+            repo_root=config.template_root,
+            output=portal_path,
+            attachments=attachments,
+        )
+        portal_bytes = portal_path.read_bytes()
+    finally:
+        # The workbook is only staged here on the way to export storage, which
+        # holds the copy that matters. Left behind, every case ever exported kept
+        # a scratch copy in var/tmp for the life of the installation -- and the
+        # retention purge does not look in that directory.
+        portal_path.unlink(missing_ok=True)
     portal_name = f"{case.reference}-{template_key}{suffix}"
     relative, digest = export_storage.write(case.reference, portal_name, portal_bytes)
     portal_recalc = recalc_output.recalculate(
@@ -867,8 +904,11 @@ def export_case(
         session.flush()
 
     log_path = work_dir / f"{case.reference}-log.xlsx"
-    log_result = log_output.export(entries, repo_root=config.template_root, output=log_path)
-    log_bytes = log_path.read_bytes()
+    try:
+        log_result = log_output.export(entries, repo_root=config.template_root, output=log_path)
+        log_bytes = log_path.read_bytes()
+    finally:
+        log_path.unlink(missing_ok=True)
     log_name = f"{case.reference}-New-Log-Format-2026.xlsx"
     log_relative, log_digest = export_storage.write(case.reference, log_name, log_bytes)
     log_recalc = recalc_output.recalculate(
