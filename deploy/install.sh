@@ -39,9 +39,42 @@ fi
 echo "==> Configuration"
 if [ ! -f "$APP/.env" ]; then
     cp "$HERE/.env.example" "$APP/.env"
-    echo "    created app/.env -- edit it before starting (BMS_SECRET_KEY is required)"
+    echo "    created app/.env"
 else
     echo "    app/.env already present, left unchanged"
+fi
+
+# Generate the session signing key rather than asking someone to do it by hand.
+# Left as CHANGE_ME it would be a shared, published secret; left unset entirely a
+# new key is minted at every start and everyone is signed out on every restart.
+if grep -q '^BMS_SECRET_KEY=CHANGE_ME' "$APP/.env" 2>/dev/null; then
+    KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+    python - "$APP/.env" "$KEY" <<'PY'
+import sys, pathlib
+path, key = pathlib.Path(sys.argv[1]), sys.argv[2]
+lines = path.read_text().splitlines(keepends=True)
+path.write_text("".join(
+    f"BMS_SECRET_KEY={key}\n" if line.startswith("BMS_SECRET_KEY=CHANGE_ME") else line
+    for line in lines
+))
+PY
+    echo "    generated a unique BMS_SECRET_KEY"
+fi
+
+# An earlier .env.example shipped a literal seed password. Neutralise it, so the
+# platform generates a strong one and prints it once instead of every install
+# sharing the same known credential.
+if grep -q '^BMS_SEED_PASSWORD=CHANGE_ME' "$APP/.env" 2>/dev/null; then
+    python - "$APP/.env" <<'PY'
+import sys, pathlib
+path = pathlib.Path(sys.argv[1])
+path.write_text("".join(
+    "# BMS_SEED_PASSWORD=   # unset: a strong one is generated and printed once\n"
+    if line.startswith("BMS_SEED_PASSWORD=CHANGE_ME") else line
+    for line in path.read_text().splitlines(keepends=True)
+))
+PY
+    echo "    removed the placeholder BMS_SEED_PASSWORD (one will be generated)"
 fi
 
 echo "==> Database"

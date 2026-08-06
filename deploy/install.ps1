@@ -60,9 +60,33 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host '==> Configuration'
 if (-not (Test-Path '.env')) {
     Copy-Item (Join-Path $here '.env.example') '.env'
-    Write-Host '    created app\.env -- edit it before starting (BMS_SECRET_KEY is required)'
+    Write-Host '    created app\.env'
 } else {
     Write-Host '    app\.env already present, left unchanged'
+}
+
+# Generate the session signing key rather than asking someone to do it by hand.
+# Left as CHANGE_ME it would be a shared, published secret; left unset entirely a
+# new key is minted at every start and everyone is signed out on every restart.
+if ((Get-Content '.env' -Raw) -match '(?m)^BMS_SECRET_KEY=CHANGE_ME') {
+    $key = & .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
+    (Get-Content '.env') |
+        ForEach-Object { if ($_ -match '^BMS_SECRET_KEY=CHANGE_ME') { "BMS_SECRET_KEY=$key" } else { $_ } } |
+        Set-Content '.env' -Encoding UTF8
+    Write-Host '    generated a unique BMS_SECRET_KEY'
+}
+
+# An earlier .env.example shipped a literal seed password. Neutralise it, so the
+# platform generates a strong one and prints it once instead of every install
+# sharing the same known credential.
+if ((Get-Content '.env' -Raw) -match '(?m)^BMS_SEED_PASSWORD=CHANGE_ME') {
+    (Get-Content '.env') |
+        ForEach-Object {
+            if ($_ -match '^BMS_SEED_PASSWORD=CHANGE_ME') {
+                '# BMS_SEED_PASSWORD=   # unset: a strong one is generated and printed once'
+            } else { $_ }
+        } | Set-Content '.env' -Encoding UTF8
+    Write-Host '    removed the placeholder BMS_SEED_PASSWORD (one will be generated)'
 }
 
 Write-Host '==> Database'
