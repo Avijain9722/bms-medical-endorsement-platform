@@ -14,8 +14,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${2:-$HERE/wheelhouse}"
 APP="$(cd "$HERE/../app" && pwd)"
 
-ABI="cp${PYTHON_VERSION//./}"
-
 # Packages a Windows host needs that pip will NOT fetch for us.
 #
 # `--platform win_amd64` selects which wheel tags are acceptable. It does not
@@ -45,7 +43,7 @@ download() {
         --platform win_amd64 \
         --python-version "$PYTHON_VERSION" \
         --implementation cp \
-        --abi "$ABI" \
+        --abi "cp${PYTHON_VERSION//./}" \
         "$@"
 }
 
@@ -59,15 +57,13 @@ echo "==> Checking the bundle is complete for a Windows target"
 # Reads each wheel's own metadata. Installing from the bundle here with
 # --no-index would NOT catch a missing Windows-only package: it skips the same
 # requirement for the same wrong reason the download did, and passes.
-python3 "$APP/tools/check_wheelhouse.py" "$DEST"
+python3 "$APP/tools/check_wheelhouse.py" "$DEST" \
+    --python-version "$PYTHON_VERSION" \
+    --platform win_amd64
 
 echo
-echo "==> Compiled wheels (every one must be ${ABI} / win_amd64)"
+echo "==> Platform-specific wheels (validated for Python ${PYTHON_VERSION}, win_amd64)"
 find "$DEST" -name '*.whl' ! -name '*none-any.whl' -printf '    %f\n' | sort
-if find "$DEST" -name '*.whl' ! -name '*none-any.whl' ! -name "*${ABI}*" | grep -q .; then
-    echo "a compiled wheel is not built for ${ABI}" >&2
-    exit 1
-fi
 
 echo
 echo "$(find "$DEST" -name '*.whl' | wc -l) wheels, $(du -sh "$DEST" | cut -f1)"
