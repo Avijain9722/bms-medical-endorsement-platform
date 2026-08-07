@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -44,6 +45,7 @@ from ..models import (
     User,
 )
 from ..outputs import log as log_output
+from ..outputs.bindings import for_template as binding_for
 from ..outputs.mapping import UnsupportedValue
 from ..registry.generate import StructuralDrift, UnknownField
 from ..outputs.nas import SUPPORTED_KEYS
@@ -208,7 +210,7 @@ def current_user(request: Request, session: Session = Depends(get_session)) -> U
     if not user_id:
         raise HTTPException(status_code=303, headers={"Location": "/login"})
     user = session.get(User, user_id)
-    if user is None:
+    if user is None or not user.active:
         raise HTTPException(status_code=303, headers={"Location": "/login"})
     return user
 
@@ -478,6 +480,13 @@ def login(
 
     for key in (user_key, client_key):
         record_success(key)
+    audit.record(
+        session,
+        action="auth.login",
+        entity_type="user",
+        entity_id=user.id,
+        actor=user.username,
+    )
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         COOKIE_NAME,
@@ -574,12 +583,48 @@ def create_case(
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
+    if transaction_type not in {item.value for item in TransactionType}:
+        raise HTTPException(status_code=400, detail="Choose a valid transaction type.")
+
     # Values chosen from the client master win over anything typed, so a portal
     # workbook receives a registered literal rather than a user's spelling.
     client = session.get(Client, client_id) if client_id else None
     chosen_sub_group = session.get(SubGroup, sub_group_id) if sub_group_id else None
     entity = session.get(LegalEntity, legal_entity_id) if legal_entity_id else None
     policy = session.get(ClientPolicy, client_policy_id) if client_policy_id else None
+
+    supplied_records = (
+        (client_id, client, "client"),
+        (sub_group_id, chosen_sub_group, "sub-group"),
+        (legal_entity_id, entity, "legal entity"),
+        (client_policy_id, policy, "policy"),
+    )
+    for supplied_id, record, label in supplied_records:
+        if supplied_id and (record is None or not record.active):
+            raise HTTPException(status_code=400, detail=f"The selected {label} is not available.")
+
+    children = (
+        (chosen_sub_group, "sub-group"),
+        (entity, "legal entity"),
+        (policy, "policy"),
+    )
+    for record, label in children:
+        if record is not None and (client is None or record.client_id != client.id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"The selected {label} does not belong to the selected client.",
+            )
+
+    if policy and policy.legal_entity_id:
+        if entity and entity.id != policy.legal_entity_id:
+            raise HTTPException(
+                status_code=400,
+                detail="The selected legal entity does not belong to the selected policy.",
+            )
+        if entity is None:
+            entity = session.get(LegalEntity, policy.legal_entity_id)
+            if entity is None or not entity.active or entity.client_id != client.id:
+                raise HTTPException(status_code=400, detail="The selected policy is not valid.")
 
     if client:
         client_name = client.name
@@ -598,6 +643,16 @@ def create_case(
                 else policy.addition_template_key
             ) or ""
 
+    if template_key:
+        if (
+            template_key not in SUPPORTED_KEYS
+            or binding_for(template_key).transaction != transaction_type
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="The selected export template does not match the transaction type.",
+            )
+
     if not client_name.strip():
         raise HTTPException(status_code=400, detail="A client is required.")
     if not insurer.strip():
@@ -607,8 +662,10 @@ def create_case(
     if email_received_date:
         try:
             received = datetime.fromisoformat(email_received_date)
-        except ValueError:
-            received = None
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400, detail="Choose a valid email received date."
+            ) from error
 
     case = pipeline.create_case(
         session,
@@ -715,13 +772,23 @@ async def _read_bounded(upload_file: UploadFile, limit: int) -> bytes | None:
 @app.post("/cases/{case_id}/process")
 def process(
     case_id: str,
+    request: Request,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
     case = _load_case(session, case_id)
-    case.status = CaseStatus.PROCESSING.value
-    pipeline.analyse_files(session, case, actor=user.username)
-    pipeline.build_members(session, case, actor=user.username)
+    try:
+        case.status = CaseStatus.PROCESSING.value
+        pipeline.analyse_files(session, case, actor=user.username)
+        pipeline.build_members(session, case, actor=user.username)
+    except pipeline.ProcessingBlocked as error:
+        session.rollback()
+        case = _load_case(session, case_id)
+        return render(
+            request,
+            "case_detail.html",
+            **_case_context(session, case, user, error=str(error)),
+        )
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
 
@@ -782,7 +849,9 @@ def approve(
     case = _load_case(session, case_id)
     member = _load_member(session, case, member_id)
     try:
-        pipeline.approve_member(session, case, member, actor=user.username)
+        pipeline.approve_member(
+            session, case, member, actor=user.username, approver_id=user.id
+        )
     except PermissionError as error:
         return render(
             request,
@@ -804,6 +873,12 @@ def reclassify(
     record = session.get(CaseFile, file_id)
     if record is None or record.case_id != case_id:
         raise HTTPException(status_code=404, detail="File not found")
+    if document_type not in {item.value for item in DocumentType}:
+        raise HTTPException(status_code=400, detail="Choose a valid document type.")
+    if member_id:
+        member = session.get(Member, member_id)
+        if member is None or member.case_id != case_id:
+            raise HTTPException(status_code=400, detail="The selected member is not in this case.")
 
     audit.record_field_change(
         session,
@@ -819,6 +894,16 @@ def reclassify(
     record.manually_classified = True
     record.classification_confidence = 1.0
     if member_id:
+        audit.record_field_change(
+            session,
+            entity_type="case_file",
+            entity_id=record.id,
+            case_id=case_id,
+            field_key="member_id",
+            old_value=record.member_id,
+            new_value=member_id,
+            actor=user.username,
+        )
         record.member_id = member_id
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
@@ -1028,14 +1113,17 @@ def admin_create_user(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    if session.scalar(select(User).where(User.username == username.strip())):
+    username = username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="A username is required.")
+    if session.scalar(select(User).where(User.username == username)):
         raise HTTPException(status_code=400, detail=f"User {username!r} already exists.")
     if len(password) < 10:
         raise HTTPException(status_code=400, detail="Choose a password of at least 10 characters.")
 
     user = User(
-        username=username.strip(),
-        display_name=display_name.strip() or username.strip(),
+        username=username,
+        display_name=display_name.strip() or username,
         log_associate=log_associate.strip() or None,
         password_hash=hash_password(password),
         is_admin=bool(is_admin),
@@ -1078,6 +1166,36 @@ def admin_reset_password(
     return RedirectResponse("/admin", status_code=303)
 
 
+@app.post("/admin/users/{user_id}/active")
+def admin_set_user_active(
+    user_id: str,
+    active: str = Form(...),
+    session: Session = Depends(get_session),
+    admin: User = Depends(current_admin),
+):
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    enabled = active == "1"
+    if active not in {"0", "1"}:
+        raise HTTPException(status_code=400, detail="Choose a valid account status.")
+    if user.id == admin.id and not enabled:
+        raise HTTPException(status_code=400, detail="You cannot disable your own account.")
+    if user.active != enabled:
+        user.active = enabled
+        audit.record(
+            session,
+            action="user.set_active",
+            entity_type="user",
+            entity_id=user.id,
+            actor=admin.username,
+            old_value=not enabled,
+            new_value=enabled,
+            detail={"username": user.username},
+        )
+    return RedirectResponse("/admin", status_code=303)
+
+
 @app.post("/admin/clients")
 def admin_create_client(
     name: str = Form(...),
@@ -1085,7 +1203,10 @@ def admin_create_client(
     session: Session = Depends(get_session),
     admin: User = Depends(current_admin),
 ):
-    client, created = master.get_or_create_client(session, name.strip(), code=code.strip() or None)
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A company name is required.")
+    client, created = master.get_or_create_client(session, name, code=code.strip() or None)
     if created:
         audit.record(
             session,
@@ -1129,6 +1250,8 @@ def admin_add_sub_group(
     client = session.get(Client, client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="A sub-group name is required.")
     sub_group, created = master.get_or_create_sub_group(
         session, client, name.strip(), emirate=emirate.strip() or None
     )
@@ -1155,6 +1278,8 @@ def admin_add_entity(
     client = session.get(Client, client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="A legal-entity name is required.")
     entity, created = master.get_or_create_entity(
         session, client, name.strip(), contract_name=contract_name.strip() or None
     )
@@ -1187,7 +1312,28 @@ def admin_add_policy(
     client = session.get(Client, client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found")
+    if not insurer.strip():
+        raise HTTPException(status_code=400, detail="An insurer is required.")
     entity = session.get(LegalEntity, legal_entity_id) if legal_entity_id else None
+    if legal_entity_id and (entity is None or not entity.active):
+        raise HTTPException(status_code=400, detail="The selected legal entity is not available.")
+    if entity is not None and entity.client_id != client.id:
+        raise HTTPException(
+            status_code=400,
+            detail="The selected legal entity does not belong to this client.",
+        )
+    for template_key, transaction_type in (
+        (addition_template_key, TransactionType.ADDITION.value),
+        (deletion_template_key, TransactionType.DELETION.value),
+    ):
+        if template_key and (
+            template_key not in SUPPORTED_KEYS
+            or binding_for(template_key).transaction != transaction_type
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Choose an export template that matches the policy transaction.",
+            )
     policy, created = master.get_or_create_policy(
         session,
         client,
@@ -1325,7 +1471,20 @@ def log_export(
     )
     download = logbook.export_range(session, criteria, actor=user.username, config=settings)
     path = ExportStorage(settings).absolute(download.relative_path)
-    return FileResponse(path, filename=download.filename)
+    return FileResponse(
+        path,
+        filename=download.filename,
+        background=BackgroundTask(_remove_transient_download, path),
+    )
+
+
+def _remove_transient_download(path: Path) -> None:
+    """Delete an on-demand log workbook once the response has sent it."""
+    path.unlink(missing_ok=True)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
 
 
 @app.get("/log/{entry_id}", response_class=HTMLResponse)

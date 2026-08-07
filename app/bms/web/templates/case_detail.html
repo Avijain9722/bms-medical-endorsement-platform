@@ -75,7 +75,7 @@
   <form method="post" action="/cases/{{ case.id }}/process">
     <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
     <button type="submit">Run local processing</button>
-    <span class="muted">Extracts text locally, classifies documents, identifies members and groups their documents. Re-running rebuilds members and discards manual corrections.</span>
+    <span class="muted">Extracts text locally, classifies documents, identifies members and groups their documents. Re-running rebuilds members and discards manual corrections; once an operational log row exists, reprocessing is refused to preserve that record.</span>
   </form>
 </div>
 

@@ -57,39 +57,65 @@ class Settings:
     change plus a migration, not a rewrite.
     """
 
-    database_url: str = os.environ.get("BMS_DATABASE_URL", "sqlite:///./bms_prototype.db")
+    database_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "BMS_DATABASE_URL", "sqlite:///./bms_prototype.db"
+        )
+    )
 
     # Uploaded originals and generated outputs are written to disk, never held in
     # the browser. Cases survive refresh, logout, restart and end of day.
-    data_root: Path = Path(os.environ.get("BMS_DATA_ROOT", REPO_ROOT / "var")).resolve()
+    data_root: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get("BMS_DATA_ROOT", REPO_ROOT / "var")
+        ).resolve()
+    )
 
     # Source workbooks. Read-only: the platform never writes here.
-    template_root: Path = Path(os.environ.get("BMS_TEMPLATE_ROOT", REPO_ROOT)).resolve()
+    template_root: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get("BMS_TEMPLATE_ROOT", REPO_ROOT)
+        ).resolve()
+    )
 
-    max_upload_bytes: int = int(os.environ.get("BMS_MAX_UPLOAD_BYTES", 64 * 1024 * 1024))
-    max_archive_members: int = int(os.environ.get("BMS_MAX_ARCHIVE_MEMBERS", 500))
-    max_archive_bytes: int = int(os.environ.get("BMS_MAX_ARCHIVE_BYTES", 512 * 1024 * 1024))
+    max_upload_bytes: int = field(
+        default_factory=lambda: int(os.environ.get("BMS_MAX_UPLOAD_BYTES", 64 * 1024 * 1024))
+    )
+    max_archive_members: int = field(
+        default_factory=lambda: int(os.environ.get("BMS_MAX_ARCHIVE_MEMBERS", 500))
+    )
+    max_archive_bytes: int = field(
+        default_factory=lambda: int(
+            os.environ.get("BMS_MAX_ARCHIVE_BYTES", 512 * 1024 * 1024)
+        )
+    )
 
     # Documents and generated files are purged this long after a case is closed.
     # The clock starts at closure, so an open case never loses its evidence.
     # Case records, member rows, log entries and the audit trail are kept.
-    document_retention_hours: int = int(os.environ.get("BMS_DOCUMENT_RETENTION_HOURS", 36))
-    purge_enabled: bool = _bool("BMS_PURGE_ENABLED", True)
+    document_retention_hours: int = field(
+        default_factory=lambda: int(os.environ.get("BMS_DOCUMENT_RETENTION_HOURS", 36))
+    )
+    purge_enabled: bool = field(default_factory=lambda: _bool("BMS_PURGE_ENABLED", True))
     # How often the background purge runs. 0 disables the scheduler entirely, in
     # which case `python3 -m bms.cli purge` can be driven by an external timer.
-    purge_interval_minutes: int = int(os.environ.get("BMS_PURGE_INTERVAL_MINUTES", 60))
+    purge_interval_minutes: int = field(
+        default_factory=lambda: int(os.environ.get("BMS_PURGE_INTERVAL_MINUTES", 60))
+    )
 
     # Set true behind TLS so the session cookie is never sent in the clear. It
     # was hard-coded False, which meant enabling it required editing source on
     # the production host.
-    cookie_secure: bool = _bool("BMS_COOKIE_SECURE", False)
+    cookie_secure: bool = field(default_factory=lambda: _bool("BMS_COOKIE_SECURE", False))
 
     # OCR must run locally. No document may be sent to an external service.
-    ocr_enabled: bool = _bool("BMS_OCR_ENABLED", True)
+    ocr_enabled: bool = field(default_factory=lambda: _bool("BMS_OCR_ENABLED", True))
     # A copy under vendor/tesseract/ is picked up automatically; BMS_TESSERACT_CMD
     # overrides it. See `bundled_tesseract`.
     tesseract_cmd: str = field(default_factory=_resolve_tesseract)
-    ocr_languages: str = os.environ.get("BMS_OCR_LANGUAGES", "eng+ara")
+    ocr_languages: str = field(
+        default_factory=lambda: os.environ.get("BMS_OCR_LANGUAGES", "eng+ara")
+    )
 
     @property
     def tessdata_dir(self) -> Path | None:

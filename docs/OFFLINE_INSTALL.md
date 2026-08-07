@@ -43,21 +43,20 @@ an air-gapped server is a compliance problem, not a convenience.
 
 | | |
 | --- | --- |
-| Libraries | 20 runtime, plus test tooling and optional extras |
-| Wheels | 33 |
-| Size | ~16 MB |
-| Operating system | Windows (`win_amd64`) |
-| Python version | 3.14 |
+| Libraries | Runtime dependencies, test tooling and optional extras |
+| Wheels | Determined by the supported platform/version matrix when refreshed |
+| Size | Determined by the wheel versions in the refreshed bundle |
+| Operating systems | Windows (`win_amd64`) and Linux (`manylinux2014_x86_64`) |
+| Python versions | 3.11, 3.12, 3.13 and 3.14 |
 
-Most libraries are pure Python and work anywhere. Five contain compiled code and
+Most libraries are pure Python and work anywhere. Four contain compiled code and
 need a build matched to the exact operating system and Python version —
-`SQLAlchemy`, `pydantic-core`, `greenlet`, `MarkupSafe` and `pywin32` — which is
-why the bundle is specific to one Python version rather than universal. Pinning
-to a single version is what keeps it to 16 MB instead of 55.
+`SQLAlchemy`, `pydantic-core`, `greenlet` and `MarkupSafe` — which is why the
+bundle carries several copies of those and only those.
 
 Also included:
 
-- **pytest, httpx and openpyxl** — so you can run the full 300-test suite on the
+- **pytest, HTTPX2, Ruff and openpyxl** — so you can run the current full suite on the
   BMS host itself, offline, rather than taking the delivered result on trust.
 - **pypdf** — reads the text layer of PDFs directly, which is exact and always
   preferable to OCR.
@@ -76,10 +75,8 @@ in a Python wheel bundle:
 
 Both are optional. The platform works without either and says so at `/health`.
 
-**Python itself is also not in the bundle.** Install **Python 3.14** from
-python.org first; on Windows tick **"Add Python to PATH"** during setup. It must
-be 3.14: the compiled wheels are built for it, and `install.ps1` checks and says
-so plainly rather than letting pip fail with a confusing message.
+**Python itself is also not in the bundle.** Install Python 3.11 or newer from
+python.org first; on Windows tick **"Add Python to PATH"** during setup.
 
 ## Verifying it worked
 
@@ -109,60 +106,27 @@ the machine it was built on.
 Library versions move. To rebuild it on a machine that does have internet:
 
 ```bash
-./deploy/build-wheelhouse.sh 3.14 deploy/wheelhouse
+cd app
+for PY in 311 312 313 314; do
+  for PLAT in win_amd64 manylinux2014_x86_64; do
+    python3 -m pip download -r requirements-dev.txt -d ../deploy/wheelhouse \
+      --only-binary=:all: --platform "$PLAT" --python-version "$PY"
+    python3 -m pip download pypdf -d ../deploy/wheelhouse \
+      --only-binary=:all: --platform "$PLAT" --python-version "$PY"
+  done
+  python3 -m pip download pywin32 -d ../deploy/wheelhouse \
+    --only-binary=:all: --platform win_amd64 --python-version "$PY"
+done
 ```
 
-One script rather than a recipe here, because a recipe and what was actually run
-drifted apart once and cost a failed installation on the BMS host. CI runs this
-exact script, so what ships is what was tested. Pass a different version as the
-first argument when BMS adopts one.
-
-### `--platform` does not make pip think it is on Windows
-
-This cost a failed installation on the BMS host, so it is worth stating plainly.
-
-`--platform win_amd64` chooses which wheel **tags** are acceptable. It does not
-change the environment markers pip evaluates. A requirement written
-
-```
-colorama ; platform_system == "Windows"
-```
-
-is therefore tested against the *building* machine — Linux — decided to be
-False, and silently left out. The bundle looks complete and installs cleanly
-here, then fails on the BMS host with:
-
-```
-ERROR: Could not find a version that satisfies the requirement colorama;
-platform_system == "Windows" (from click)
-```
-
-Anything behind such a marker has to be named explicitly, as `colorama` is
-above.
-
-### Verify it the way that actually catches this
-
-The obvious check — installing from the wheelhouse with `--no-index` on the
-build machine — **does not work**. It skips the Windows-gated requirement for
-exactly the same wrong reason the download did, and passes.
-
-Use the checker instead. It reads each wheel's own metadata and reports every
-requirement a Windows host would activate that is not in the folder. No network,
-no Windows needed:
+Add a Python version to the `PY` list when BMS adopts one. Then test the result
+the way it will actually be used — a clean virtual environment with the network
+refused:
 
 ```bash
-cd app
-python3 tools/check_wheelhouse.py ../deploy/wheelhouse
+python3 -m venv /tmp/check
+/tmp/check/bin/python -m pip install --no-index \
+    --find-links deploy/wheelhouse -r app/requirements-dev.txt
 ```
 
-It exits non-zero when something is missing, so it can gate a release. A local
-`--no-index` install is still worth running afterwards — it catches a different
-class of problem, a wheel whose tags do not match the target — but on its own it
-is not evidence the bundle is complete.
-
-The only complete proof is installing the bundle on Windows. The
-`offline-install` CI job does exactly that on every change: `offline-bundle`
-cross-builds the wheelhouse on Linux — the situation that hid the missing
-package — uploads it, and `offline-install` installs it on a Windows runner with
-`--no-index`, then runs the suite and starts the platform. Had it existed, the
-bundle that failed at BMS would have failed here first.
+If that succeeds, the bundle is complete.
