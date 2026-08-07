@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ member.full_name or 'Member' }}{% endblock %}
-{% macro field(member, provenance, key, label, kind='text') %}
+{% macro field(member, provenance, key, label, kind='text', readonly=false) %}
   {% set meta = provenance.get(key) %}
   <div>
     <label for="{{ key }}">{{ label }}</label>
-    <input type="{{ kind }}" id="{{ key }}" name="{{ key }}" value="{{ member[key] or '' }}">
+    <input type="{{ kind }}" id="{{ key }}" name="{{ key }}" value="{{ member[key] or '' }}"{% if readonly %} readonly{% endif %}>
     {% if meta %}
       <div class="confidence {% if meta.confidence and meta.confidence < 0.75 %}low{% endif %}">
         {% if meta.reviewed %}confirmed by {{ meta.source_name }}
@@ -55,13 +55,20 @@
       {{ field(member, provenance, 'relation', 'Relation') }}
       {{ field(member, provenance, 'category', 'Category') }}
       {{ field(member, provenance, 'contract_name', 'Contract name') }}
-      {{ field(member, provenance, 'effective_date', 'Effective date') }}
+      {{ field(member, provenance, 'effective_date', 'Effective date', 'date', member.transaction_type == 'deletion') }}
       {{ field(member, provenance, 'principal_card_no', 'Principal card no.') }}
       {{ field(member, provenance, 'member_card_no', 'Member card no.') }}
       {{ field(member, provenance, 'deletion_reason', 'Deletion reason') }}
+      {% if member.transaction_type == 'deletion' %}
+        {{ field(member, provenance, 'cancellation_date', 'Cancellation date', 'date') }}
+      {% endif %}
       {{ field(member, provenance, 'email', 'Email') }}
       {{ field(member, provenance, 'mobile_no', 'Mobile no.') }}
     </div>
+    {% if member.transaction_type == 'deletion' %}
+      <p class="muted">For Dubai policies, enter the cancellation date. The effective date is
+      calculated automatically as cancellation date + 30 days.</p>
+    {% endif %}
   </div>
   <p>
     <button type="submit">Save corrections</button>

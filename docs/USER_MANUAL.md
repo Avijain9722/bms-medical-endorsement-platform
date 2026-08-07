@@ -229,6 +229,9 @@ Four severities:
 | --- | --- | --- | --- |
 | `missing_mandatory_field` | Critical | A field the insurer requires is empty | Fill it from the documents, or get it from the client |
 | `deletion_identifier_missing` | Critical | A deletion has nothing to identify the member by | Add the card number, staff ID or Emirates ID |
+| `cancellation_date_missing` | Critical | A Dubai deletion has no cancellation date | Enter the cancellation date; the effective date is then calculated automatically |
+| `cancellation_date_invalid` | Critical | The cancellation date is not a real `YYYY-MM-DD` date | Correct the cancellation date |
+| `deletion_effective_date_incorrect` | Critical | A Dubai deletion's effective date is not cancellation + 30 days | Save the correct cancellation date so the platform recalculates it |
 | `eid_placeholder_misuse` | Critical | `111111` has been used in an Emirates ID | Emirates ID never takes the newborn placeholder. Get the real number or leave the member out |
 | `eid_format_invalid` | Critical | The Emirates ID is not in `784-YYYY-NNNNNNN-N` form | Re-read the card; correct the digits |
 | `eid_missing` | Review required | No Emirates ID found | Check whether the member has one yet. Newborns often do not |
@@ -265,8 +268,10 @@ exist.
 | Deletion, Abu Dhabi policy | Today's processing date |
 | Deletion, Dubai policy | Cancellation date **+ 30 days** |
 
-The platform applies these itself. If a client asks for a date in the past, that
-is a critical error, not a setting to change.
+The platform applies these itself. For a Dubai deletion, enter the cancellation
+date on the member review screen; the effective date remains blank and export is
+blocked until that date exists, then it is calculated automatically. If a client
+asks for a date in the past, that is a critical error, not a setting to change.
 
 ### Deleting a principal
 

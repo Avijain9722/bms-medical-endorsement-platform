@@ -66,19 +66,16 @@ def resolve_effective_date(
     processing_date: date,
     emirate: str | None = None,
     cancellation_date: date | None = None,
-) -> tuple[date, str]:
+) -> tuple[date | None, str]:
     """Determine the effective date, per the rules BMS confirmed.
 
     Additions use the current processing date. Deletions use the processing date
     for Abu Dhabi policies, and cancellation + 30 days for Dubai policies.
     """
     if transaction_type == TransactionType.DELETION.value:
-        if (emirate or "").strip().lower() == "dubai":
+        if (emirate or "").strip().lower() in {"dubai", "dxb"}:
             if cancellation_date is None:
-                return processing_date, (
-                    "Dubai deletion needs a cancellation date; "
-                    "falling back to the processing date pending confirmation"
-                )
+                return None, "Dubai deletion needs a cancellation date."
             return (
                 cancellation_date + timedelta(days=DUBAI_DELETION_OFFSET_DAYS),
                 f"Dubai policy: cancellation date + {DUBAI_DELETION_OFFSET_DAYS} days",
@@ -102,15 +99,21 @@ def check_member(
     processing_date: date | None = None,
     documents: list | None = None,
     is_newborn: bool = False,
+    emirate: str | None = None,
 ) -> list[Finding]:
     """Validate one member record. Returns every finding, worst first."""
     processing_date = processing_date or date.today()
     documents = documents or []
     findings: list[Finding] = []
     is_addition = member.transaction_type == TransactionType.ADDITION.value
+    is_dubai_deletion = (
+        not is_addition and (emirate or "").strip().lower() in {"dubai", "dxb"}
+    )
 
     required = ADDITION_REQUIRED_FIELDS if is_addition else DELETION_REQUIRED_FIELDS
     for field_key, label in required:
+        if is_dubai_deletion and field_key == "effective_date":
+            continue
         value = getattr(member, field_key, None)
         if value in (None, ""):
             findings.append(
@@ -121,6 +124,47 @@ def check_member(
                     field_key=field_key,
                 )
             )
+
+    if is_dubai_deletion:
+        raw_cancellation = getattr(member, "cancellation_date", None)
+        cancellation = _parse_iso(raw_cancellation)
+        if not raw_cancellation:
+            findings.append(
+                Finding(
+                    code="cancellation_date_missing",
+                    severity=Severity.CRITICAL,
+                    message=(
+                        "A Dubai deletion requires the cancellation date. The effective date "
+                        "cannot be calculated without it."
+                    ),
+                    field_key="cancellation_date",
+                )
+            )
+        elif cancellation is None:
+            findings.append(
+                Finding(
+                    code="cancellation_date_invalid",
+                    severity=Severity.CRITICAL,
+                    message=(
+                        f"Cancellation date {raw_cancellation!r} is not a valid YYYY-MM-DD date."
+                    ),
+                    field_key="cancellation_date",
+                )
+            )
+        else:
+            expected = cancellation + timedelta(days=DUBAI_DELETION_OFFSET_DAYS)
+            if _parse_iso(member.effective_date) != expected:
+                findings.append(
+                    Finding(
+                        code="deletion_effective_date_incorrect",
+                        severity=Severity.CRITICAL,
+                        message=(
+                            "A Dubai deletion's effective date must be the cancellation date "
+                            f"plus {DUBAI_DELETION_OFFSET_DAYS} days ({expected.isoformat()})."
+                        ),
+                        field_key="effective_date",
+                    )
+                )
 
     # A deletion needs something that identifies the member to the insurer.
     if not is_addition and not (member.member_card_no or member.emirates_id):

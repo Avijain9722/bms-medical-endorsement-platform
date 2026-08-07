@@ -2,17 +2,18 @@
 
 ## Current stabilization verification
 
-The Python 3.14 consolidation pass was verified locally on Windows on 2026-08-06:
+The current Python 3.14 build was verified locally on Windows on 2026-08-07:
 
 ```
-314 passed · 0 failures · 0 errors · 0 skipped · 245.3s
+324 passed · 0 failures · 0 errors · 0 skipped · 231.3s
 Python 3.14.7 · DeprecationWarning promoted to error
 ```
 
 The detailed 297-test record below is retained as the historical evidence for
 commit `c13b35f`; the current suite adds coverage for authorization revocation,
 master-data boundaries, nested archive budgets, untrusted workbook limits,
-approval invalidation, immutable export history and transient log downloads.
+approval invalidation, immutable export history, transient log downloads,
+offline wheel compatibility, and the Dubai cancellation-date workflow.
 
 ---
 
@@ -167,7 +168,8 @@ structural.
 
 - Effective date is the processing date; a retroactive date is a critical error.
 - Abu Dhabi deletions take the processing date; Dubai deletions take
-  cancellation + 30 days.
+  cancellation + 30 days. A missing or invalid Dubai cancellation date blocks
+  export instead of substituting the processing date.
 - Deleting a principal pulls in their dependants without listing them.
 - `111111` fills a newborn's unavailable mandatory field but is a **critical
   error** in an Emirates ID.

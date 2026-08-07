@@ -65,7 +65,7 @@ reports can be requested from the Actions tab. See
 [`docs/CI_PIPELINE.md`](../docs/CI_PIPELINE.md) for what each one covers and how
 to read a failure.
 
-**314 tests.** 41 of them run the preservation suite against the real supplied
+**324 tests.** 41 of them run the preservation suite against the real supplied
 workbooks; the rest cover extraction, classification, instruction parsing,
 archive safety, grouping, the validation rules, the end-to-end case pipeline and
 the web tier.

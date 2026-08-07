@@ -11,7 +11,7 @@ import itertools
 import re
 import sys
 import zipfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bms import db  # noqa: E402
 from bms.config import Settings  # noqa: E402
-from bms.models import Base, Case, CaseFile, Member, User  # noqa: E402
+from bms.models import Base, Case, CaseFile, Member, ReviewFlag, User  # noqa: E402
 from bms.web import app as web_app  # noqa: E402
 from bms.web.security import (  # noqa: E402
     hash_password,
@@ -226,6 +226,60 @@ def test_correction_is_saved_and_revalidated(client):
         member = session.get(Member, member_id)
         assert member.nationality == "India"
         assert member.provenance["nationality"]["reviewed"] is True
+
+
+def test_dubai_deletion_collects_cancellation_and_derives_effective_date(client):
+    sign_in(client)
+    created = client.post(
+        "/cases",
+        data={
+            "client_name": "DUBAI DEMO CLIENT",
+            "sub_group": "Dubai",
+            "insurer": "DEMO INSURANCE (TEST)",
+            "transaction_type": "deletion",
+            "bms_comments": (
+                "Please cancel staff 90001, card ABCD-EFGH-IJKL-MNOP, Demo Person."
+            ),
+        },
+    )
+    case_id = created.headers["location"].rsplit("/", 1)[1]
+    assert client.post(f"/cases/{case_id}/process").status_code == 303
+
+    with db.session_scope() as session:
+        member = session.scalars(select(Member).where(Member.case_id == case_id)).one()
+        member_id = member.id
+        assert member.effective_date is None
+        codes = set(
+            session.scalars(
+                select(ReviewFlag.code).where(ReviewFlag.member_id == member_id)
+            )
+        )
+        assert "cancellation_date_missing" in codes
+
+    review = client.get(f"/cases/{case_id}/members/{member_id}")
+    assert 'name="cancellation_date"' in review.text
+
+    cancellation = date.today() + timedelta(days=10)
+    saved = client.post(
+        f"/cases/{case_id}/members/{member_id}",
+        data={"cancellation_date": cancellation.isoformat()},
+    )
+    assert saved.status_code == 303
+
+    with db.session_scope() as session:
+        member = session.get(Member, member_id)
+        assert member.cancellation_date == cancellation.isoformat()
+        assert member.effective_date == (cancellation + timedelta(days=30)).isoformat()
+        codes = set(
+            session.scalars(
+                select(ReviewFlag.code).where(ReviewFlag.member_id == member_id)
+            )
+        )
+        assert not {
+            "cancellation_date_missing",
+            "cancellation_date_invalid",
+            "deletion_effective_date_incorrect",
+        } & codes
 
 
 def test_reclassification_rejects_unknown_types_and_members_from_other_cases(client):
