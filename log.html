@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Operational log{% endblock %}
+{% block content %}
+<h1>Operational log</h1>
+<p class="muted">One row per member, held in the database and maintained across days.
+The six post-submission columns stay blank until the corresponding event is recorded.</p>
+
+<div class="card">
+  <h2>Filter</h2>
+  <form method="get" action="/log" class="grid three">
+    <div><label for="date_from">From</label><input type="date" id="date_from" name="date_from" value="{{ filters.date_from }}"></div>
+    <div><label for="date_to">To</label><input type="date" id="date_to" name="date_to" value="{{ filters.date_to }}"></div>
+    <div><label for="client_name">Client</label>
+      <select id="client_name" name="client_name"><option value="">All</option>
+        {% for c in clients %}<option value="{{ c }}" {% if filters.client_name == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select></div>
+    <div><label for="insurer">Insurer</label>
+      <select id="insurer" name="insurer"><option value="">All</option>
+        {% for i in insurers %}<option value="{{ i }}" {% if filters.insurer == i %}selected{% endif %}>{{ i }}</option>{% endfor %}</select></div>
+    <div><label for="entry_type">Entry type</label>
+      <select id="entry_type" name="entry_type"><option value="">All</option>
+        {% for t in entry_types %}<option value="{{ t }}" {% if filters.entry_type == t %}selected{% endif %}>{{ t }}</option>{% endfor %}</select></div>
+    <div><label for="status">Status</label>
+      <select id="status" name="status"><option value="">All</option>
+        {% for s in statuses %}<option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
+    <div style="align-self:end"><button type="submit">Apply filter</button> <a class="btn secondary" href="/log">Clear</a></div>
+  </form>
+
+  <form method="post" action="/log/export" style="margin-top:.75rem">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    {% for key, value in filters.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+    <button type="submit" class="secondary">Download New Log Format -2026 for this filter</button>
+    <span class="muted">{{ paging.total }} row(s) &middot; {{ criteria.describe() }}</span>
+  </form>
+</div>
+
+{% if entries %}
+<div class="card">
+  <h2>Entries</h2>
+  <table>
+    <tr>
+      <th>Case</th><th>Beneficiary</th><th>Relation</th><th>Entry type</th><th>Effective</th>
+      <th>Status</th><th>Ref. no.</th><th>Sent to insurer</th><th>Card #</th><th>Card sent</th>
+      <th>Saiba voucher</th><th>BBM invoice</th><th></th>
+    </tr>
+    {% for e in entries %}
+    <tr>
+      <td>{% set case = cases.get(e.case_id) %}
+        {% if case %}<a href="/cases/{{ case.id }}">{{ case.reference }}</a>{% else %}&mdash;{% endif %}
+        <div class="muted">{{ e.client_name or '' }}</div></td>
+      <td>{{ e.beneficiary_name or '' }}<div class="muted">{{ e.staff_id or '' }}</div></td>
+      <td>{{ e.relation or '' }}</td>
+      <td>{{ e.entry_type or '' }}</td>
+      <td>{{ e.effective_date or '' }}</td>
+      <td><span class="pill">{{ e.status or '' }}</span></td>
+      <td>{{ e.request_ref_no or '' }}</td>
+      <td>{{ e.request_sent_date_to_insurer or '' }}</td>
+      <td>{{ e.card_no or '' }}</td>
+      <td>{{ e.card_receive_and_sent_date or '' }}</td>
+      <td>{{ e.saiba_voucher_no or '' }}</td>
+      <td>{{ e.bbm_invoice_date or '' }}</td>
+      <td><a href="/log/{{ e.id }}">Update</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if paging.pages > 1 %}
+  <p class="muted" style="margin-top:.75rem">
+    Showing {{ paging.first_row }}&ndash;{{ paging.last_row }} of {{ paging.total }}
+    &middot; page {{ paging.current }} of {{ paging.pages }}
+    {% set q = [] %}{% for k, v in filters.items() %}{% if v %}{% set _ = q.append(k ~ '=' ~ v) %}{% endif %}{% endfor %}
+    {% set qs = ('&' ~ q|join('&')) if q else '' %}
+    {% if paging.has_previous %}
+      &middot; <a href="/log?page=1{{ qs }}">First</a>
+      &middot; <a href="/log?page={{ paging.current - 1 }}{{ qs }}">Previous</a>
+    {% endif %}
+    {% if paging.has_next %}
+      &middot; <a href="/log?page={{ paging.current + 1 }}{{ qs }}">Next</a>
+      &middot; <a href="/log?page={{ paging.pages }}{{ qs }}">Last</a>
+    {% endif %}
+  </p>
+  {% endif %}
+</div>
+{% else %}
+<div class="card"><p class="muted">No log entries match this filter. Entries are created when a case is exported.</p></div>
+{% endif %}
+{% endblock %}

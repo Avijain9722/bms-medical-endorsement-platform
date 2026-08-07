@@ -1,0 +1,39 @@
+{# Brand note: colours come from the approved BMS brand guideline, not from the
+   logo -- the guideline states the logo colours must not be reused elsewhere.
+   Fonts are referenced by name with a local fallback chain; no runtime call is
+   made to any external font service. #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}BMS Endorsements{% endblock %}</title>
+<link rel="stylesheet" href="/static/bms.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">bms<span>.</span> Masaood &mdash; Endorsements</div>
+  <nav>
+    {% if user %}
+      <a href="/">Cases</a>
+      <a href="/log">Log</a>
+      <a href="/audit">Audit</a>
+      {% if user.is_admin %}<a href="/admin">Administration</a>{% endif %}
+      <span class="muted" style="color:#cfd6e0">{{ user.display_name }}</span>
+      {# The token has to sit INSIDE the form. It was one line below the closing
+         tag, so the browser sent nothing and every sign-out was refused as a
+         forgery -- the tests missed it because their client attaches the token
+         to any POST regardless of what the page actually contains. #}
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+        <button class="secondary">Sign out</button>
+      </form>
+    {% endif %}
+  </nav>
+</header>
+<main>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

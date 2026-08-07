@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Log entry{% endblock %}
+{% block content %}
+<h1>{{ entry.beneficiary_name or 'Log entry' }}</h1>
+<p class="muted">
+  {% if case %}<a href="/cases/{{ case.id }}">{{ case.reference }}</a> &middot; {% endif %}
+  {{ entry.client_name or '' }}{% if entry.sub_group %} &middot; {{ entry.sub_group }}{% endif %}
+  &middot; <a href="/log">Back to the log</a>
+</p>
+
+<div class="card">
+  <h2>Record</h2>
+  <table>
+    <tr><th>Insurer</th><td>{{ entry.insurer or '' }}</td>
+        <th>Policy no.</th><td>{{ entry.policy_no or '' }}</td></tr>
+    <tr><th>Relation</th><td>{{ entry.relation or '' }}</td>
+        <th>Category</th><td>{{ entry.category or '' }}</td></tr>
+    <tr><th>Staff ID</th><td>{{ entry.staff_id or '' }}</td>
+        <th>Emirates ID</th><td>{{ entry.emirates_id or '' }}</td></tr>
+    <tr><th>Entry type</th><td>{{ entry.entry_type or '' }}</td>
+        <th>Effective date</th><td>{{ entry.effective_date or '' }}</td></tr>
+    <tr><th>Status</th><td><span class="pill">{{ entry.status or '' }}</span></td>
+        <th>Shared by</th><td>{{ entry.shared_by or '' }}</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Post-submission columns</h2>
+  <p class="muted">These stay genuinely blank until the matching action below is taken.
+  Placeholders such as <code>N/A</code>, <code>Pending</code>, <code>-</code> or
+  <code>0</code> are refused &mdash; a blank cell is the correct state until the
+  value exists.</p>
+  <table>
+    <tr><th>Request Ref. No.</th><td>{{ entry.request_ref_no or '—' }}</td></tr>
+    <tr><th>Request sent date to insurer</th><td>{{ entry.request_sent_date_to_insurer or '—' }}</td></tr>
+    <tr><th>CARD #</th><td>{{ entry.card_no or '—' }}</td></tr>
+    <tr><th>Card receive and sent date</th><td>{{ entry.card_receive_and_sent_date or '—' }}</td></tr>
+    <tr><th>Saiba Voucher No.</th><td>{{ entry.saiba_voucher_no or '—' }}</td></tr>
+    <tr><th>BBM Invoice date</th><td>{{ entry.bbm_invoice_date or '—' }}</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Actions</h2>
+  <div class="grid three">
+    <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <input type="hidden" name="event" value="submitted_to_insurer">
+      <label>Record submission to insurer</label>
+      <input type="text" name="request_ref_no" placeholder="Request Ref. No.">
+      <input type="text" name="request_sent_date_to_insurer" placeholder="Sent date dd/mm/yyyy">
+      <button class="secondary">Record submission</button>
+    </form>
+    <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <input type="hidden" name="event" value="card_received">
+      <label>Record card issued / sent</label>
+      <input type="text" name="card_no" placeholder="CARD #">
+      <input type="text" name="card_receive_and_sent_date" placeholder="Card date dd/mm/yyyy">
+      <button class="secondary">Record card</button>
+    </form>
+    <form method="post" action="/log/{{ entry.id }}/fields" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <label>Status and remarks</label>
+      <select name="status">
+        {% for s in statuses %}<option value="{{ s }}" {% if entry.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+      </select>
+      <input type="text" name="remarks" placeholder="REMARKS" value="{{ entry.remarks or '' }}">
+      <input type="text" name="remarks2" placeholder="Remarks2" value="{{ entry.remarks2 or '' }}">
+      <button class="secondary">Save</button>
+    </form>
+    <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <input type="hidden" name="event" value="voucher_recorded">
+      <label>Saiba voucher</label>
+      <input type="text" name="saiba_voucher_no" placeholder="Saiba Voucher No.">
+      <button class="secondary">Record voucher</button>
+    </form>
+    <form method="post" action="/log/{{ entry.id }}/event" class="grid">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <input type="hidden" name="event" value="invoice_dated">
+      <label>BBM invoice date</label>
+      <input type="text" name="bbm_invoice_date" placeholder="dd/mm/yyyy">
+      <button class="secondary">Record invoice date</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

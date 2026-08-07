@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}{{ case.reference }}{% endblock %}
+{% block content %}
+<h1>{{ case.reference }} &mdash; {{ case.client_name }}</h1>
+<p class="muted">
+  {{ case.insurer }}{% if case.policy_no %} &middot; policy {{ case.policy_no }}{% endif %}
+  &middot; {{ case.transaction_type }} &middot; <span class="pill">{{ case.status }}</span>
+</p>
+
+{% if blocking %}
+<div class="error">
+  <strong>{{ blocking|length }} critical issue(s) block export.</strong>
+  Critical errors cannot be overridden &mdash; correct the underlying information.
+</div>
+{% endif %}
+
+{% for flag in case_flags %}
+  <div class="flag sev-{{ flag.severity }}">{{ flag.message }}</div>
+{% endfor %}
+
+<div class="card">
+  <h2>BMS Comments</h2>
+  <p class="muted">The pasted client email body. Stored verbatim; it is the source for everything parsed below.</p>
+  <form method="post" action="/cases/{{ case.id }}/comments">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <textarea name="bms_comments">{{ case.bms_comments or '' }}</textarea>
+    <p><button type="submit" class="secondary">Save comments</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Documents</h2>
+  <form method="post" action="/cases/{{ case.id }}/upload" enctype="multipart/form-data">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <input type="file" name="files" multiple>
+    <button type="submit" class="secondary">Upload</button>
+    <span class="muted">Individual files or ZIP folders. Nested ZIPs are expanded.</span>
+  </form>
+  {% if files %}
+  <table style="margin-top:.75rem">
+    <tr><th>File</th><th>Type</th><th>Status</th><th>Member</th><th>Reclassify</th></tr>
+    {% for file in files %}
+    <tr>
+      <td>{{ file.original_name }}{% if file.archive_path %}<div class="muted">{{ file.archive_path }}</div>{% endif %}</td>
+      <td>{{ file.document_type }}
+        <div class="confidence {% if file.classification_confidence < 0.35 %}low{% endif %}">
+          {{ '%.0f'|format(file.classification_confidence * 100) }}%{% if file.manually_classified %} manual{% endif %}
+        </div>
+      </td>
+      <td>{{ file.status }}{% if file.notes %}<div class="muted">{{ file.notes }}</div>{% endif %}</td>
+      <td class="muted">{% if file.member_id %}{{ file.member_id[:8] }}{% else %}unassigned{% endif %}</td>
+      <td>
+        <form method="post" action="/cases/{{ case.id }}/files/{{ file.id }}/classify" class="inline">
+          <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+          <select name="document_type">
+            {% for t in ['passport','emirates_id','visa','entry_permit','birth_certificate','insurance_card','coc','medical_declaration','photograph','cancellation','client_sheet','unknown'] %}
+              <option value="{{ t }}" {% if file.document_type == t %}selected{% endif %}>{{ t }}</option>
+            {% endfor %}
+          </select>
+          <select name="member_id">
+            <option value="">(keep)</option>
+            {% for m in members %}<option value="{{ m.id }}">{{ m.full_name or m.id[:8] }}</option>{% endfor %}
+          </select>
+          <button class="secondary">Set</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">No documents uploaded yet.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Processing</h2>
+  <form method="post" action="/cases/{{ case.id }}/process">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <button type="submit">Run local processing</button>
+    <span class="muted">Extracts text locally, classifies documents, identifies members and groups their documents. Re-running rebuilds members and discards manual corrections; once an operational log row exists, reprocessing is refused to preserve that record.</span>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Members</h2>
+  {% if members %}
+  <table>
+    <tr><th>Name</th><th>Relation</th><th>Staff ID</th><th>Category</th><th>Effective</th><th>Documents</th><th>Issues</th><th>Approved</th></tr>
+    {% for member in members %}
+    {% set member_flags = flags.get(member.id, []) %}
+    <tr>
+      <td><a href="/cases/{{ case.id }}/members/{{ member.id }}">{{ member.full_name or '(unnamed)' }}</a></td>
+      <td>{{ member.relation or '' }}</td>
+      <td>{{ member.staff_id or '' }}</td>
+      <td>{{ member.category or '' }}</td>
+      <td>{{ member.effective_date or '' }}</td>
+      <td>{{ member.documents|length }}</td>
+      <td>
+        {% set crit = member_flags|selectattr('severity','equalto','critical')|list %}
+        {% if crit %}<span class="pill sev-critical">{{ crit|length }} critical</span>{% endif %}
+        {% set rev = member_flags|selectattr('severity','equalto','review_required')|list %}
+        {% if rev %}<span class="pill sev-review_required">{{ rev|length }} review</span>{% endif %}
+        {% if not member_flags %}<span class="muted">none</span>{% endif %}
+      </td>
+      <td>{% if member.approved %}yes{% else %}<span class="muted">no</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">No members yet. Paste the instruction, upload documents, then run processing.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Export</h2>
+  <form method="post" action="/cases/{{ case.id }}/export">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <label for="template_key">Portal template</label>
+    <select id="template_key" name="template_key" style="max-width:24rem">
+      {% for key in templates_available %}
+        <option value="{{ key }}" {% if case.template_key == key %}selected{% endif %}>{{ key }}</option>
+      {% endfor %}
+    </select>
+    <p>
+      <button type="submit" {% if blocking %}disabled{% endif %}>Generate portal workbook and BMS log</button>
+      {% if blocking %}<span class="muted">Blocked while critical issues are open.</span>{% endif %}
+    </p>
+  </form>
+  {% if exports %}
+  <table>
+    <tr><th>File</th><th>Kind</th><th>Rows</th><th>Structure verified</th><th>Created</th><th></th></tr>
+    {% for item in exports %}
+    <tr>
+      <td>{{ item.filename }}</td><td>{{ item.kind }}</td><td>{{ item.row_count }}</td>
+      <td>{% if item.fingerprint_ok %}yes{% else %}<strong>no</strong>{% endif %}</td>
+      <td class="muted">{{ item.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
+      <td><a href="/cases/{{ case.id }}/exports/{{ item.id }}/download">Download</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Case</h2>
+  <p>
+    <a class="btn secondary" href="/audit?case_id={{ case.id }}">View audit trail</a>
+    {% if case.status == 'closed' %}
+    <form method="post" action="/cases/{{ case.id }}/reopen" class="inline">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <button class="secondary">Reopen case</button>
+    </form>
+    {% else %}
+    <form method="post" action="/cases/{{ case.id }}/close" class="inline">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <button class="secondary">Close case</button>
+    </form>
+    {% endif %}
+    <a class="btn secondary" href="/log">Operational log</a>
+    <span class="muted">Closing starts the document retention clock. Records and the audit trail are kept.</span>
+  </p>
+</div>
+{% endblock %}

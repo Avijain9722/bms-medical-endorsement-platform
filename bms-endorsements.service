@@ -1,0 +1,31 @@
+# systemd unit for the BMS endorsement platform.
+#
+#   sudo cp deploy/bms-endorsements.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bms-endorsements
+#
+# Edit User, Group and the paths to match your installation.
+
+[Unit]
+Description=BMS Medical Endorsement Platform
+After=network.target
+
+[Service]
+Type=simple
+User=bms
+Group=bms
+WorkingDirectory=/opt/bms-endorsements/app
+EnvironmentFile=/opt/bms-endorsements/app/.env
+ExecStart=/opt/bms-endorsements/app/.venv/bin/uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+# The service reads the immutable templates and writes only to its data root.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/opt/bms-endorsements/app/var /opt/bms-endorsements/app
+
+[Install]
+WantedBy=multi-user.target

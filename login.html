@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="card" style="max-width:22rem;margin:3rem auto">
+  <h1>Sign in</h1>
+  <p class="muted">Internal use only, within the BMS environment.</p>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login" class="grid">
+    <div><label for="username">Username</label><input type="text" id="username" name="username" autofocus></div>
+    <div><label for="password">Password</label><input type="password" id="password" name="password"></div>
+    <div><button type="submit">Sign in</button></div>
+  </form>
+</div>
+{% endblock %}
