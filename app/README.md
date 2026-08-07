@@ -1,8 +1,8 @@
 # BMS Medical Endorsement Platform — application
 
 Locally hosted platform for processing corporate medical insurance endorsement
-requests. See `/root/.claude/plans/` for the approved plan, and
-`00_START_HERE/MASTER_DEVELOPMENT_PROMPT.md` for the governing requirements.
+requests. See `../CLAUDE.md` and `../00_START_HERE/MASTER_DEVELOPMENT_PROMPT.md`
+for the governing requirements.
 
 The source workbooks in `02_PORTAL_TEMPLATES/` and `03_INTERNAL_LOG_TEMPLATE/`
 are immutable inputs. Nothing in this application writes to them.
@@ -12,11 +12,12 @@ are immutable inputs. Nothing in this application writes to them.
 **The template registry, fingerprinting and OOXML surgical writer** — the
 riskiest part of the system, built and proven first.
 
-**Phase 1 of the prototype** — a working internal web application: pasted client
-instructions, multi-file and ZIP upload, local OCR, member identification and
-document grouping, a member-level review screen with confidence and exception
-flags, persistent case storage, one NAS addition and one NAS deletion workflow,
-the approved New Log Format -2026 output, and an append-only audit trail.
+**The operational platform** — a working internal web application: pasted client
+instructions, bounded multi-file and nested-ZIP upload, local OCR, member
+identification and document grouping, member-level review and approval, persistent
+case storage, all eight registered insurer workflows, supporting-document packages,
+the approved New Log Format -2026 output, client-master administration, retention,
+migrations, Windows deployment and an append-only audit trail.
 See [`docs/PROTOTYPE_SETUP.md`](../docs/PROTOTYPE_SETUP.md) to install and run it.
 
 | Module | Responsibility |
@@ -31,7 +32,7 @@ See [`docs/PROTOTYPE_SETUP.md`](../docs/PROTOTYPE_SETUP.md) to install and run i
 | `bms/intake/` | Pasted-instruction parsing and safe archive expansion. |
 | `bms/matching/grouping.py` | Member identification, document grouping and principal linkage, each with a score and a reason. |
 | `bms/validation/rules.py` | Exception and confidence rules. Critical findings block export and cannot be overridden. |
-| `bms/outputs/` | NAS addition and deletion rows, the BMS log, and the per-template value maps. |
+| `bms/outputs/` | Registered NAS, ADNIC, Sukoon and Daman rows, supporting packages, the BMS log, recalculation and per-template value maps. |
 | `bms/pipeline.py` | Case orchestration: intake, analysis, member building, review, export, retention purge. |
 | `bms/web/` | The internal application. Server-rendered, no state in the browser. |
 
@@ -64,7 +65,7 @@ reports can be requested from the Actions tab. See
 [`docs/CI_PIPELINE.md`](../docs/CI_PIPELINE.md) for what each one covers and how
 to read a failure.
 
-**140 tests.** 41 of them run the preservation suite against the real supplied
+**314 tests.** 41 of them run the preservation suite against the real supplied
 workbooks; the rest cover extraction, classification, instruction parsing,
 archive safety, grouping, the validation rules, the end-to-end case pipeline and
 the web tier.
@@ -104,13 +105,12 @@ be approved, that export is blocked while any critical flag is open, that
 corrections are audited with their previous value, and that the retention purge
 removes documents only after closure while keeping the record.
 
-## Not yet built
+## Operational limits
 
-- ADNIC, Sukoon and Daman workflows. The registry, value maps and specs already
-  describe them; only the row builders and their confirmed literals are missing.
-- The Windows Excel recalculation worker (`ENGINE_RECALC`) for the Daman and log
-  hand-off. Needs a Windows host with Excel.
-- Supporting-document ZIP packaging with a manifest.
-- Alembic migrations, background job queue, and a scheduled purge runner.
-- Client master, employee master and category mapping screens; these currently
-  live on the case rather than in a shared library.
+- Formula recalculation is implemented, but can only be performed on a Windows
+  host with Microsoft Excel installed; elsewhere the export records why it was
+  not recalculated and Excel calculates it when opened.
+- Structural fidelity is automated. Final acceptance by each insurer's live
+  portal still requires a controlled upload test outside this repository.
+- Client configuration is centralised. Employee and category values remain part
+  of the reviewed case/member record rather than separate master-data screens.

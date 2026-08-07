@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bms import db  # noqa: E402
 from bms.config import Settings  # noqa: E402
-from bms.models import Base, Case, Member, User  # noqa: E402
+from bms.models import Base, Case, CaseFile, Member, User  # noqa: E402
 from bms.web import app as web_app  # noqa: E402
 from bms.web.security import (  # noqa: E402
     hash_password,
@@ -226,6 +226,48 @@ def test_correction_is_saved_and_revalidated(client):
         member = session.get(Member, member_id)
         assert member.nationality == "India"
         assert member.provenance["nationality"]["reviewed"] is True
+
+
+def test_reclassification_rejects_unknown_types_and_members_from_other_cases(client):
+    sign_in(client)
+    case_ids = []
+    for staff_id in ("82270", "82271"):
+        created = client.post(
+            "/cases",
+            data={
+                "client_name": "BASATIN",
+                "insurer": "QATAR INSURANCE",
+                "transaction_type": "addition",
+                "bms_comments": f"Kindly add {staff_id} Demo Member Single CAT C",
+            },
+        )
+        case_id = created.headers["location"].rsplit("/", 1)[1]
+        case_ids.append(case_id)
+        client.post(
+            f"/cases/{case_id}/upload",
+            files={"files": (f"{staff_id}.txt", VISA_TEXT, "text/plain")},
+        )
+        client.post(f"/cases/{case_id}/process")
+
+    with db.session_scope() as session:
+        file_id = session.scalar(
+            select(CaseFile.id).where(CaseFile.case_id == case_ids[0])
+        )
+        other_member_id = session.scalar(
+            select(Member.id).where(Member.case_id == case_ids[1])
+        )
+
+    unknown = client.post(
+        f"/cases/{case_ids[0]}/files/{file_id}/classify",
+        data={"document_type": "forged", "member_id": ""},
+    )
+    cross_case = client.post(
+        f"/cases/{case_ids[0]}/files/{file_id}/classify",
+        data={"document_type": "visa", "member_id": other_member_id},
+    )
+
+    assert unknown.status_code == 400
+    assert cross_case.status_code == 400
 
 
 def test_audit_page_lists_activity(client):
