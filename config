@@ -1,0 +1,13 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[remote "origin"]
+	url = https://github.com/Avijain9722/bms-medical-endorsement-platform.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "stabilization/python-3.14-followup"]
+	remote = origin
+	merge = refs/heads/stabilization/python-3.14-followup

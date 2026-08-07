@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8
+httpx2>=2.9,<3       # required by starlette.testclient; plain httpx is deprecated
+openpyxl>=3.1        # used only to independently verify generated workbooks
+ruff>=0.16,<0.17

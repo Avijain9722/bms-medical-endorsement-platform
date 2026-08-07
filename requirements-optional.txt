@@ -1,0 +1,23 @@
+# Local OCR and PDF readers. All optional: the text pipeline reports which
+# engines are present and marks a document `ocr_unavailable` when none can read
+# it, rather than guessing at its contents.
+#
+# Tesseract is a system package, not a Python one:
+#   Debian/Ubuntu:  apt-get install tesseract-ocr tesseract-ocr-ara
+#   Windows:        install the UB Mannheim build, then set BMS_TESSERACT_CMD
+#
+# pypdf reads the embedded text layer of PDFs, which is exact and preferred over
+# OCR. It requires a working `cryptography` build; where that is broken the
+# adapter reports itself unavailable and the pipeline falls through.
+pypdf>=4.2
+
+# Excel automation, Windows only. Needed so the BMS log and the Daman workbook
+# have their formulas evaluated before hand-off. Without it both files are still
+# produced correctly; Excel calculates them on first open, and /health reports
+# the gap.
+# pywin32>=306 ; sys_platform == "win32"
+
+# Virus scanning is a system package, not a Python one:
+#   Debian/Ubuntu:  apt-get install clamav clamav-daemon && freshclam
+#   Windows:        install ClamAV and ensure clamdscan.exe is on PATH
+# Without it, uploads are recorded as unscanned and raise a review flag.

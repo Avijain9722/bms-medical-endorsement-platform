@@ -1,90 +1,116 @@
-# BMS Medical Endorsement Platform
+# BMS Medical Endorsement Platform — application
 
-Internal platform for BMS Masaood Insurance L.L.C. – O.P.C. that turns a pasted
-client instruction plus a pile of supporting documents into a correctly filled
-insurer portal workbook and the approved BMS operational log.
+Locally hosted platform for processing corporate medical insurance endorsement
+requests. See `../CLAUDE.md` and `../00_START_HERE/MASTER_DEVELOPMENT_PROMPT.md`
+for the governing requirements.
 
-Runs entirely inside the BMS network. Nothing it processes leaves the host.
+The source workbooks in `02_PORTAL_TEMPLATES/` and `03_INTERNAL_LOG_TEMPLATE/`
+are immutable inputs. Nothing in this application writes to them.
 
----
+## What is built so far
 
-## Start here
+**The template registry, fingerprinting and OOXML surgical writer** — the
+riskiest part of the system, built and proven first.
 
-| You are | Read |
+**The operational platform** — a working internal web application: pasted client
+instructions, bounded multi-file and nested-ZIP upload, local OCR, member
+identification and document grouping, member-level review and approval, persistent
+case storage, all eight registered insurer workflows, supporting-document packages,
+the approved New Log Format -2026 output, client-master administration, retention,
+migrations, Windows deployment and an append-only audit trail.
+See [`docs/PROTOTYPE_SETUP.md`](../docs/PROTOTYPE_SETUP.md) to install and run it.
+
+| Module | Responsibility |
 | --- | --- |
-| Processing endorsement requests | [docs/USER_MANUAL.md](docs/USER_MANUAL.md) |
-| Installing or running the host | [docs/ADMIN_MANUAL.md](docs/ADMIN_MANUAL.md) and [docs/PROTOTYPE_SETUP.md](docs/PROTOTYPE_SETUP.md) |
-| Maintaining the code | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| Wondering what is actually proven | [docs/TEST_RESULTS.md](docs/TEST_RESULTS.md) |
+| `bms/ooxml/package.py` | Reads a workbook as ordered ZIP parts and writes it back with part order, compression and ZIP metadata intact. Refuses to add or remove parts. |
+| `bms/ooxml/fingerprint.py` | Structural fingerprint: sheet order and visibility, headers, hidden columns, every inline and x14 validation, defined names, tables, protection, VBA digest, part list. Plus a readable `diff`. |
+| `bms/ooxml/sheet.py` | Cell-level writes into `sheetData` only. Preserves the document's own namespace prefixes so no other element is rewritten. |
+| `bms/templates/specs.py` | The registered templates, with the column map, header row and first input row read out of each workbook. |
+| `bms/registry/generate.py` | Generates from a fresh copy of the master, then re-fingerprints and blocks release on any structural delta. |
+| `bms/models.py`, `bms/db.py`, `bms/storage.py` | PostgreSQL-ready schema, session handling, content-addressed file storage on disk. |
+| `bms/ocr/` | Pluggable local text extraction, rule-based field reading (MRZ with check digits, Emirates ID, UID, dates) and content-driven document classification. |
+| `bms/intake/` | Pasted-instruction parsing and safe archive expansion. |
+| `bms/matching/grouping.py` | Member identification, document grouping and principal linkage, each with a score and a reason. |
+| `bms/validation/rules.py` | Exception and confidence rules. Critical findings block export and cannot be overridden. |
+| `bms/outputs/` | Registered NAS, ADNIC, Sukoon and Daman rows, supporting packages, the BMS log, recalculation and per-template value maps. |
+| `bms/pipeline.py` | Case orchestration: intake, analysis, member building, review, export, retention purge. |
+| `bms/web/` | The internal application. Server-rendered, no state in the browser. |
 
-Full index: [docs/README.md](docs/README.md).
+## Why not openpyxl
 
-## Run it
+openpyxl cannot round-trip these files. Reading the BMS log with it emits:
+
+```
+UserWarning: Data Validation extension is not supported and will be removed
+```
+
+Every MAIN DATA dropdown is an x14 extension validation, so a save would silently
+drop all six of them. The Daman workbook adds a password-locked VBA project,
+SHA-512 sheet protection, 18 tables, four form controls and a Microsoft Purview
+sensitivity label. The surgical writer touches `sheetData` and nothing else, so
+all of it survives byte-for-byte — verified by test.
+
+## Running the checks
 
 ```bash
 cd app
-python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python3 -m alembic upgrade head
-.venv/bin/python -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000
+
+python3 tools/verify_sources.py     # supplied files unchanged?
+python3 -m pytest tests/ -q         # full suite: preservation + application
+python3 -m tools.reports all        # readable evidence, not pass/fail
 ```
 
-On Windows the last line is `.venv\Scripts\python.exe -m uvicorn bms.web.app:app --host 127.0.0.1 --port 8000`.
+Both checks also run automatically on every push and pull request, and the
+reports can be requested from the Actions tab. See
+[`docs/CI_PIPELINE.md`](../docs/CI_PIPELINE.md) for what each one covers and how
+to read a failure.
 
-`.venv/bin/python -m uvicorn` rather than a bare `uvicorn`: the explicit path
-works whether or not the virtual environment is activated in this particular
-terminal. A bare `uvicorn` in a fresh terminal fails with
-`No module named uvicorn`, because it runs the system Python instead.
+**314 tests.** 41 of them run the preservation suite against the real supplied
+workbooks; the rest cover extraction, classification, instruction parsing,
+archive safety, grouping, the validation rules, the end-to-end case pipeline and
+the web tier.
 
+The preservation suite proves:
 
-The first start prints a seed account's password once. Capture it, sign in,
-create real accounts. Set `BMS_SECRET_KEY` before that first start or everyone is
-logged out at every restart.
+- a generated workbook has **zero structural delta** from its master, for all nine
+  registered templates;
+- no OOXML part is added, removed or reordered;
+- the source workbooks are never modified;
+- Daman's `vbaProject.bin`, `docProps/custom.xml`, form controls, printer settings
+  and all 18 table parts are byte-identical after population;
+- Daman writes start at row 3, below its instruction row and header row;
+- NAS headers survive intact, including the load-bearing trailing space in
+  `"Effective Date "` and the double space in `"Waived PEC  Declaration"`;
+- the log's 1,101 example rows are stripped at registration and none reach output;
+- the log's six post-submission columns are **genuinely empty cells** — never
+  `N/A`, `Pending`, `-` or `0`;
+- no field can be mapped onto a log formula or helper column;
+- an unrecognised field raises rather than being silently dropped.
 
-Scripted installs for Linux and Windows are in [`deploy/`](deploy).
+## Conventions that matter
 
-## What it will not do
+- **Never invent a value.** An unknown field raises `UnknownField`. A structural
+  change raises `StructuralDrift` and the output file is deleted.
+- **Template defects are preserved, not fixed.** The empty NAS Department/Grade
+  lookups, the `SubNat_Other` range pointing at a blank cell, the Work Region
+  validation that starts one row late, ADNIC's `#REF!` named range and Daman's
+  pre-broken `INDIRECT(SUBSTITUTE(#REF!,...))` all stay exactly as supplied.
+- **Style prototypes.** New cells inherit the template's own format for their
+  column; cells that already exist keep the style the template gave them.
 
-By instruction and by design:
+The application tests additionally prove that uploads survive a new database
+session, that identical files are deduplicated, that an unreadable document is
+flagged rather than silently skipped, that a member with a critical flag cannot
+be approved, that export is blocked while any critical flag is open, that
+corrections are audited with their previous value, and that the retention purge
+removes documents only after closure while keeping the record.
 
-- No mailbox or Outlook integration — the email body is pasted by the user.
-- No external AI or token-based document API — OCR runs locally.
-- No change to the structure of any insurer, TPA or BMS log template — every
-  generated workbook is re-fingerprinted against its master and blocked on any
-  delta.
-- No invented values — missing information raises a flag, never a plausible guess.
-- No override of a critical error — the underlying data has to be corrected.
-- Post-submission fields stay genuinely blank until staff perform the explicit
-  workflow action.
+## Operational limits
 
-## Repository layout
-
-```
-00_START_HERE/             the brief, file manifest and SHA256SUMS   (read-only)
-01_BRAND_ASSETS/           logos and brand guidelines                (read-only)
-02_PORTAL_TEMPLATES/       the eight insurer workbooks               (read-only)
-03_INTERNAL_LOG_TEMPLATE/  New Log Format -2026                      (read-only)
-04_DEVELOPMENT_EXAMPLES/   reference emails — never imported         (read-only)
-05_TECHNICAL_REFERENCE/    NAS portal field guide                    (read-only)
-
-app/                       the application
-  bms/                     pipeline, ocr, matching, validation, outputs, ooxml, web
-  tests/                   314 automated tests
-  migrations/              Alembic
-  tools/                   source verification and reporting helpers
-deploy/                    install scripts and service units
-docs/                      the documentation set
-```
-
-Everything numbered `00_`–`05_` is supplied material. The platform reads it and
-never writes to it.
-
-## Verify
-
-```bash
-cd app && python3 -m pytest tests -q     # 314 tests
-cd app && python3 -m ruff check .        # reliability lint
-cd app && python3 -m compileall -q bms   # production-module compile check
-cd app && python3 tools/verify_sources.py   # supplied workbooks unaltered
-curl -s http://127.0.0.1:8000/health     # what this host can and cannot do
-```
+- Formula recalculation is implemented, but can only be performed on a Windows
+  host with Microsoft Excel installed; elsewhere the export records why it was
+  not recalculated and Excel calculates it when opened.
+- Structural fidelity is automated. Final acceptance by each insurer's live
+  portal still requires a controlled upload test outside this repository.
+- Client configuration is centralised. Employee and category values remain part
+  of the reviewed case/member record rather than separate master-data screens.
