@@ -30,6 +30,7 @@ from bms.models import (  # noqa: E402
 )
 from bms.ocr.text import PlainTextFile, TextPipeline  # noqa: E402
 from bms.outputs import package as package_output  # noqa: E402
+from bms.ooxml.package import file_sha256  # noqa: E402
 from bms.storage import ExportStorage  # noqa: E402
 from bms.web import app as web_app  # noqa: E402
 from bms.web.security import hash_password  # noqa: E402
@@ -303,6 +304,7 @@ def test_range_export_writes_the_approved_workbook(session, user, env):
     )
     assert download.row_count == 1
     path = ExportStorage(env).absolute(download.relative_path)
+    assert file_sha256(path) == download.sha256
     assert path.exists()
 
     with zipfile.ZipFile(path) as archive:
@@ -554,6 +556,7 @@ def test_log_screen_and_event_recording_through_the_ui(session, user, env):
     download = http.post("/log/export", data={"date_from": "", "date_to": ""})
     assert download.status_code == 200
     assert download.content[:2] == b"PK"
+    assert list((env.export_root / "_log").rglob("*.xlsx")) == []
 
 
 def test_status_and_remarks_can_be_saved_through_the_ui(session, user, env):

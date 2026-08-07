@@ -1,4 +1,4 @@
-# Runtime dependencies for the BMS endorsement platform prototype.
+# Runtime dependencies for the BMS endorsement platform.
 #
 # The template-preservation core (bms/ooxml, bms/registry) deliberately has no
 # dependencies at all -- general-purpose spreadsheet libraries rewrite parts they

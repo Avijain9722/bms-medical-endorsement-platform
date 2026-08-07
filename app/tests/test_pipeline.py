@@ -19,6 +19,7 @@ from bms.models import (  # noqa: E402
     Base,
     Case,
     CaseFile,
+    Export,
     FileStatus,
     LogEntry,
     Member,
@@ -27,6 +28,7 @@ from bms.models import (  # noqa: E402
 )
 from bms.ocr.text import PlainTextFile, TextPipeline  # noqa: E402
 from bms.outputs import log as log_output  # noqa: E402
+from bms.ooxml.package import file_sha256  # noqa: E402
 from bms.storage import ExportStorage  # noqa: E402
 from bms.web.security import hash_password  # noqa: E402
 
@@ -263,6 +265,43 @@ def test_a_no_op_edit_writes_no_audit_row(session, user, env):
         )
     )
     assert rows == []
+    assert member.provenance["staff_id"]["reviewed"] is True
+
+
+def test_editing_an_approved_member_requires_approval_again(session, user, env):
+    case = make_case(session, user, env)
+    member = Member(
+        case_id=case.id,
+        row_index=0,
+        transaction_type="addition",
+        first_name="Before",
+        approved=True,
+        approved_by_id=user.id,
+        approved_at=datetime.now(timezone.utc),
+    )
+    session.add(member)
+    session.flush()
+
+    pipeline.update_member_field(
+        session, member, "first_name", "After", actor=user.username
+    )
+
+    assert member.approved is False
+    assert member.approved_by_id is None
+    assert member.approved_at is None
+
+
+def test_approval_records_the_approver(session, user, env):
+    case = make_case(session, user, env)
+    member = Member(case_id=case.id, row_index=0, transaction_type="addition")
+    session.add(member)
+    session.flush()
+
+    pipeline.approve_member(
+        session, case, member, actor=user.username, approver_id=user.id
+    )
+
+    assert member.approved_by_id == user.id
 
 
 def test_a_member_with_a_critical_flag_cannot_be_approved(session, user, env):
@@ -319,6 +358,92 @@ def test_full_addition_export_produces_both_workbooks(session, user, env):
     # that directory.
     leftovers = sorted(p.name for p in (env.data_root / "tmp").glob("*"))
     assert leftovers == [], f"scratch files left behind: {leftovers}"
+
+
+def test_reexport_keeps_prior_files_and_records_current_hashes(session, user, env):
+    case = make_case(session, user, env)
+    member = Member(case_id=case.id, row_index=0, transaction_type="addition")
+    _complete(member)
+    session.add(member)
+    session.flush()
+    pipeline.approve_member(session, case, member, actor=user.username)
+
+    first_portal, first_log = pipeline.export_case(
+        session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+    )
+    storage = ExportStorage(env)
+    first_path = storage.absolute(first_portal.relative_path)
+    first_bytes = first_path.read_bytes()
+
+    second_portal, second_log = pipeline.export_case(
+        session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+    )
+
+    assert first_portal.relative_path != second_portal.relative_path
+    assert first_log.relative_path != second_log.relative_path
+    assert first_path.read_bytes() == first_bytes
+    for record in (first_portal, first_log, second_portal, second_log):
+        assert file_sha256(storage.absolute(record.relative_path)) == record.sha256
+
+
+def test_later_export_adds_log_entries_for_newly_approved_members(session, user, env):
+    case = make_case(session, user, env)
+    first = Member(case_id=case.id, row_index=0, transaction_type="addition", staff_id="90001")
+    second = Member(case_id=case.id, row_index=1, transaction_type="addition", staff_id="90002")
+    for member in (first, second):
+        _complete(member)
+        session.add(member)
+    session.flush()
+
+    pipeline.approve_member(session, case, first, actor=user.username)
+    pipeline.export_case(
+        session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+    )
+    pipeline.approve_member(session, case, second, actor=user.username)
+    pipeline.export_case(
+        session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+    )
+
+    entries = session.scalars(select(LogEntry).where(LogEntry.case_id == case.id)).all()
+    assert {entry.member_id for entry in entries} == {first.id, second.id}
+
+
+def test_export_rejects_unknown_and_wrong_transaction_templates(session, user, env):
+    case = make_case(session, user, env)
+    member = Member(case_id=case.id, row_index=0, transaction_type="addition")
+    _complete(member)
+    member.approved = True
+    session.add(member)
+    session.flush()
+
+    with pytest.raises(pipeline.ExportBlocked, match="not a supported"):
+        pipeline.export_case(
+            session, case, template_key="forged.template", actor=user.username, config=env
+        )
+    with pytest.raises(pipeline.ExportBlocked, match="does not match"):
+        pipeline.export_case(
+            session, case, template_key="nas.deletion.v1", actor=user.username, config=env
+        )
+
+    assert session.scalars(select(Export).where(Export.case_id == case.id)).all() == []
+    assert not (env.export_root / case.reference).exists()
+
+
+def test_reprocessing_is_refused_after_log_rows_exist(session, user, env):
+    case = make_case(session, user, env)
+    member = Member(case_id=case.id, row_index=0, transaction_type="addition")
+    _complete(member)
+    member.approved = True
+    session.add(member)
+    session.flush()
+    pipeline.export_case(
+        session, case, template_key="nas.addition.aldar.v1", actor=user.username, config=env
+    )
+
+    with pytest.raises(pipeline.ProcessingBlocked, match="operational log"):
+        pipeline.build_members(session, case, actor=user.username)
+
+    assert session.get(Member, member.id) is member
 
 
 def test_reprocessing_does_not_query_once_per_document(session, user, env):

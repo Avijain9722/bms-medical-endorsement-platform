@@ -37,7 +37,7 @@ request evidence on demand.
 
 ## Workflow 1 — Tests (automatic)
 
-Runs three independent gates. All must pass.
+Runs four independent gates. All must pass.
 
 ### Gate 1: Source integrity
 
@@ -81,6 +81,11 @@ workbooks. For each of the nine registered
 templates the suite populates a fresh copy with synthetic member rows, then
 re-reads the result and compares its structure with the original.
 
+Deprecation warnings are promoted to errors so a dependency or standard-library
+change cannot quietly become a Python 3.14 runtime failure. The same matrix also
+runs the repository's reliability-focused Ruff rules and compiles every
+production module before the job can pass.
+
 It checks, among other things:
 
 - sheet order and which sheets are hidden;
@@ -115,6 +120,15 @@ On Python 3.14, CI runs `deploy/install.ps1` and `deploy/verify.ps1`, starts the
 real Uvicorn application, checks `/health` and `/login`, and verifies that browser
 security headers are present. This catches Windows path, launcher and installer
 failures that unit tests alone cannot expose.
+
+### Gate 4: Offline bundle and disconnected Windows install
+
+CI builds the Python 3.14 Windows wheelhouse on Linux, checks the wheel metadata
+for Windows-only dependencies, and transfers it to a clean Windows runner. That
+runner installs with `--no-index`, verifies the application, runs the suite and
+starts the real service while pip is unable to contact PyPI. This proves the
+package delivered to an offline BMS host is complete, rather than merely proving
+that an online development installation works.
 
 ---
 

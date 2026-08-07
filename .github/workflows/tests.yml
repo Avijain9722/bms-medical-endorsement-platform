@@ -35,9 +35,9 @@ jobs:
     name: Source integrity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -62,30 +62,38 @@ jobs:
           - os: windows-latest
             python: "3.14"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
       # The preservation core is standard library only, by design: general
       # purpose spreadsheet libraries rewrite parts they do not understand. The
       # application tier adds FastAPI and SQLAlchemy, and the tests add pytest
-      # and httpx. Local OCR engines are deliberately NOT installed here -- the
+      # and HTTPX2. Local OCR engines are deliberately NOT installed here -- the
       # suite proves the pipeline degrades honestly without them.
       - name: Install dependencies
         run: python -m pip install --quiet -r requirements-dev.txt
         working-directory: app
 
       - name: Run suite
-        run: python -m pytest tests -q --junit-xml=../test-results.xml
+        run: python -W error::DeprecationWarning -m pytest tests -q --junit-xml=../test-results.xml
+        working-directory: app
+
+      - name: Run reliability lint
+        run: python -m ruff check .
+        working-directory: app
+
+      - name: Compile production modules
+        run: python -m compileall -q bms
         working-directory: app
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
           path: test-results.xml
           if-no-files-found: warn
 
@@ -93,9 +101,9 @@ jobs:
     name: Windows install and verify
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # Matches the version the offline Windows package pins.
           python-version: "3.14"
@@ -171,9 +179,9 @@ jobs:
     name: Offline bundle (built on Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # Deliberately NOT the target version. The bundle is cross-built, which
           # is exactly the situation that hid the missing package: pip evaluates
@@ -194,9 +202,9 @@ jobs:
     needs: offline-bundle
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
 

@@ -1,0 +1,2 @@
+# Shell entry points must retain an LF shebang when edited or committed on Windows.
+*.sh text eol=lf
