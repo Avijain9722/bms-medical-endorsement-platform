@@ -247,6 +247,35 @@ def test_import_is_audited(session):
     assert event is not None and event.actor == "tester"
 
 
+def test_import_caps_the_uncompressed_workbook_size(monkeypatch):
+    data = build_master_workbook([{"Client": "BOUNDED DEMO LLC"}])
+    monkeypatch.setattr(master, "MAX_IMPORT_UNCOMPRESSED_BYTES", 100)
+
+    with pytest.raises(ValueError, match="expands beyond"):
+        master.read_rows(data)
+
+
+def test_import_rejects_xml_document_types():
+    original = build_master_workbook([{"Client": "UNTRUSTED DEMO LLC"}])
+    source = BytesIO(original)
+    rewritten = BytesIO()
+    with zipfile.ZipFile(source) as incoming, zipfile.ZipFile(rewritten, "w") as outgoing:
+        for info in incoming.infolist():
+            payload = incoming.read(info)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                marker = b"<worksheet "
+                payload = payload.replace(
+                    marker,
+                    b'<!DOCTYPE worksheet [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+                    + marker,
+                    1,
+                )
+            outgoing.writestr(info, payload)
+
+    with pytest.raises(ValueError, match="entities are not supported"):
+        master.read_rows(rewritten.getvalue())
+
+
 # ------------------------------------------------------------ administration
 
 
@@ -290,6 +319,42 @@ def test_short_passwords_are_refused(client):
         "/admin/users", data={"username": "weak", "password": "short", "is_admin": ""}
     )
     assert response.status_code == 400
+
+
+def test_disabling_an_account_revokes_its_existing_session(client):
+    processor = BrowserClient(web_app.app, follow_redirects=False)
+    sign_in(processor, "processor", "processor-password")
+    assert processor.get("/").status_code == 200
+
+    sign_in(client, "admin", "admin-password")
+    with db.session_scope() as session:
+        processor_id = session.scalar(
+            select(User.id).where(User.username == "processor")
+        )
+    response = client.post(
+        f"/admin/users/{processor_id}/active", data={"active": "0"}
+    )
+
+    assert response.status_code == 303
+    assert processor.get("/").status_code == 303
+    with db.session_scope() as session:
+        disabled = session.get(User, processor_id)
+        assert disabled is not None and disabled.active is False
+        event = session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "user.set_active")
+        )
+        assert event is not None
+
+
+def test_administrator_cannot_disable_their_own_account(client):
+    sign_in(client, "admin", "admin-password")
+    with db.session_scope() as session:
+        admin_id = session.scalar(select(User.id).where(User.username == "admin"))
+
+    response = client.post(f"/admin/users/{admin_id}/active", data={"active": "0"})
+
+    assert response.status_code == 400
+    assert client.get("/admin").status_code == 200
 
 
 def test_company_and_sub_group_can_be_entered_through_the_ui(client):
@@ -397,6 +462,48 @@ def test_case_still_accepts_free_text_when_the_company_is_not_in_the_master(clie
         case = session.scalars(select(Case)).one()
         assert case.client_name == "ONE-OFF DEMO CLIENT"
         assert case.client_id is None
+
+
+def test_case_rejects_master_records_from_another_client(client):
+    sign_in(client, "admin", "admin-password")
+    with db.session_scope() as session:
+        first, _ = master.get_or_create_client(session, "FIRST DEMO LLC")
+        second, _ = master.get_or_create_client(session, "SECOND DEMO LLC")
+        subgroup, _ = master.get_or_create_sub_group(session, second, "OTHER-HQ")
+        first_id, subgroup_id = first.id, subgroup.id
+
+    response = client.post(
+        "/cases",
+        data={
+            "transaction_type": "addition",
+            "client_id": first_id,
+            "sub_group_id": subgroup_id,
+            "insurer": "DEMO INSURANCE (TEST)",
+        },
+    )
+
+    assert response.status_code == 400
+    with db.session_scope() as session:
+        assert session.scalar(select(Case)) is None
+
+
+def test_policy_rejects_a_legal_entity_from_another_client(client):
+    sign_in(client, "admin", "admin-password")
+    with db.session_scope() as session:
+        first, _ = master.get_or_create_client(session, "POLICY OWNER DEMO LLC")
+        second, _ = master.get_or_create_client(session, "ENTITY OWNER DEMO LLC")
+        entity, _ = master.get_or_create_entity(session, second, "OTHER ENTITY")
+        first_id, entity_id = first.id, entity.id
+
+    response = client.post(
+        f"/admin/clients/{first_id}/policies",
+        data={
+            "insurer": "DEMO INSURANCE (TEST)",
+            "legal_entity_id": entity_id,
+        },
+    )
+
+    assert response.status_code == 400
 
 
 def test_a_case_needs_a_client_from_somewhere(client):

@@ -147,6 +147,17 @@ def test_uncompressed_size_is_capped():
     assert result.truncated is True
 
 
+def test_nested_archives_share_one_uncompressed_size_budget():
+    first = _zip({"first.bin": b"a" * 6})
+    second = _zip({"second.bin": b"b" * 6})
+    outer = _zip({"first.zip": first, "second.zip": second})
+
+    result = archives.extract(outer, config=Settings(max_archive_bytes=10))
+
+    assert sum(len(member.data) for member in result.members) <= 10
+    assert result.truncated is True
+
+
 def test_corrupt_archive_is_reported_not_raised():
     result = archives.extract(b"this is not a zip file")
     assert result.members == []
