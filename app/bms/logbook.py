@@ -14,6 +14,7 @@ exists to make possible:
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -25,6 +26,8 @@ from . import audit
 from .config import Settings, settings
 from .models import Case, CaseStatus, LogEntry
 from .outputs import log as log_output
+from .outputs import recalc as recalc_output
+from .ooxml.package import file_sha256
 from .storage import ExportStorage
 
 # The controlled Status vocabulary from the workbook's own validation list.
@@ -259,7 +262,7 @@ def export_range(
     work_dir = config.data_root / "tmp"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     filename = f"New-Log-Format-2026_{criteria.slug()}_{stamp}.xlsx"
     temporary = work_dir / filename
     try:
@@ -273,7 +276,16 @@ def export_range(
         temporary.unlink(missing_ok=True)
 
     storage = ExportStorage(config)
-    relative, digest = storage.write("_log", filename, generated)
+    batch_id = uuid.uuid4().hex
+    try:
+        relative, _ = storage.write("_log", filename, generated, version=batch_id)
+        recalculation = recalc_output.recalculate(
+            storage.absolute(relative), template_key="bms.log.2026"
+        )
+        digest = file_sha256(storage.absolute(relative))
+    except Exception:
+        storage.delete_version("_log", batch_id)
+        raise
 
     audit.record(
         session,
@@ -284,6 +296,7 @@ def export_range(
             "filter": criteria.describe(),
             "rows": result.row_count,
             "sha256": digest,
+            "recalculated": recalculation.performed,
         },
     )
     return LogDownload(

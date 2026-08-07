@@ -37,7 +37,7 @@ request evidence on demand.
 
 ## Workflow 1 — Tests (automatic)
 
-Runs two independent gates. Both must pass.
+Runs three independent gates. All must pass.
 
 ### Gate 1: Source integrity
 
@@ -71,11 +71,13 @@ template — the correct response is not to disable the check. It is:
 **When it fails and nobody meant to change anything**, something has modified a
 controlled file. Investigate before merging.
 
-### Gate 2: Template preservation suite
+### Gate 2: Full application and template-preservation suite
 
 **Question it answers:** *does populating a workbook change anything it shouldn't?*
 
-41 tests run against the real supplied workbooks. For each of the nine registered
+The full suite runs on Linux with Python 3.11 and on Windows with Python 3.12 and
+the deployment target, Python 3.14. Within it, 41 tests run against the real supplied
+workbooks. For each of the nine registered
 templates the suite populates a fresh copy with synthetic member rows, then
 re-reads the result and compares its structure with the original.
 
@@ -106,6 +108,13 @@ structural drift in daman.addition.v1:
 
 That is a real defect in the change being made, not a flaky test. The generated
 file is deleted rather than released.
+
+### Gate 3: Windows install and smoke test
+
+On Python 3.14, CI runs `deploy/install.ps1` and `deploy/verify.ps1`, starts the
+real Uvicorn application, checks `/health` and `/login`, and verifies that browser
+security headers are present. This catches Windows path, launcher and installer
+failures that unit tests alone cannot expose.
 
 ---
 
@@ -207,7 +216,7 @@ other job runner if BMS later moves off GitHub Actions.
 
 | File | Purpose |
 | --- | --- |
-| `.github/workflows/tests.yml` | The automatic gate. Two jobs: source integrity, then the preservation suite. Also startable by hand. |
+| `.github/workflows/tests.yml` | The automatic gate: source integrity, the cross-platform full suite, and a Python 3.14 Windows install/smoke test. Also startable by hand. |
 | `.github/workflows/reports.yml` | The on-demand reports. Manual trigger only, with a choice of report and a row count. |
 | `app/tools/verify_sources.py` | Recomputes SHA-256 for every supplied file and checks it against the manifest. Immutable folders fail the build; docs and examples are advisory. |
 | `app/tools/reports.py` | Produces the inventory, preservation and blank-field reports as Markdown. |
@@ -232,10 +241,10 @@ what was already there.
 
 ## Limits worth knowing
 
-- The pipeline runs on Linux. The **Windows Excel recalculation step**
-  (`ENGINE_RECALC`, used for the Daman and log hand-off) cannot run here and is
-  not covered by these checks. It needs a Windows host with Excel, which is a BMS
-  dependency.
+- The pipeline runs on Linux and Windows. The hosted Windows worker does not
+  include Microsoft Excel, so the COM recalculation path is exercised through
+  its deterministic availability/fallback tests. An end-to-end recalculation
+  still needs a BMS Windows host with Excel installed.
 - The preservation suite proves *structural* fidelity. It does not prove an
   insurer's portal will accept the file — only a real upload does that.
 - Reports use synthetic data. They demonstrate mechanics, not real case output.

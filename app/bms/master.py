@@ -50,6 +50,11 @@ VALID_EMIRATES = {
     "sharjah": "Northern Emirates",
 }
 
+# Client-master workbooks are small tabular inputs. These caps keep a compressed
+# upload from expanding into an unbounded number of in-memory XML parts.
+MAX_IMPORT_PARTS = 10_000
+MAX_IMPORT_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+
 
 @dataclass
 class ImportSummary:
@@ -79,10 +84,27 @@ def normalise_emirate(value: str | None) -> str | None:
 # ------------------------------------------------------------------ workbook
 
 
+def _safe_xml(data: bytes) -> ET.Element:
+    upper = data.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise ValueError("workbook XML declarations and entities are not supported")
+    return ET.fromstring(data)
+
+
 def read_rows(data: bytes, sheet_name: str | None = None) -> list[dict[str, str]]:
     """Read the first worksheet of an .xlsx as a list of {header: value}."""
-    pkg = OoxmlPackage.open_bytes(data)
-    parts = sheet_part_names(pkg.read("xl/workbook.xml"), pkg.read("xl/_rels/workbook.xml.rels"))
+    pkg = OoxmlPackage.open_bytes(
+        data,
+        max_parts=MAX_IMPORT_PARTS,
+        max_uncompressed_bytes=MAX_IMPORT_UNCOMPRESSED_BYTES,
+    )
+    workbook_xml = pkg.read("xl/workbook.xml")
+    relationships_xml = pkg.read("xl/_rels/workbook.xml.rels")
+    # sheet_part_names parses these parts too; validate them first so uploaded
+    # XML cannot declare external entities or a document type.
+    _safe_xml(workbook_xml)
+    _safe_xml(relationships_xml)
+    parts = sheet_part_names(workbook_xml, relationships_xml)
     if not parts:
         return []
     part = parts.get(sheet_name) if sheet_name else next(iter(parts.values()))
@@ -93,7 +115,7 @@ def read_rows(data: bytes, sheet_name: str | None = None) -> list[dict[str, str]
     if "xl/sharedStrings.xml" in pkg:
         shared = [
             "".join(t.text or "" for t in si.iter(M + "t"))
-            for si in ET.fromstring(pkg.read("xl/sharedStrings.xml"))
+            for si in _safe_xml(pkg.read("xl/sharedStrings.xml"))
         ]
 
     def value_of(cell: ET.Element) -> str:
@@ -111,7 +133,7 @@ def read_rows(data: bytes, sheet_name: str | None = None) -> list[dict[str, str]
         return node.text
 
     grid: dict[int, dict[str, str]] = {}
-    root = ET.fromstring(pkg.read(part))
+    root = _safe_xml(pkg.read(part))
     for row in root.findall(f"{M}sheetData/{M}row"):
         index = int(row.get("r"))
         cells = {}

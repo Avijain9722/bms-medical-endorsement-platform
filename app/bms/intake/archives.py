@@ -39,6 +39,12 @@ class ExtractionResult:
         self.skipped.append((name, reason))
 
 
+@dataclass
+class _ExtractionBudget:
+    members: int = 0
+    bytes: int = 0
+
+
 def is_archive(filename: str) -> bool:
     return PurePosixPath(filename.lower()).suffix in ARCHIVE_SUFFIXES
 
@@ -57,9 +63,11 @@ def extract(
     prefix: str = "",
     config: Settings | None = None,
     _depth: int = 0,
+    _budget: _ExtractionBudget | None = None,
 ) -> ExtractionResult:
     """Expand a ZIP into its file members, recursing into nested ZIPs."""
     config = config or settings
+    budget = _budget or _ExtractionBudget()
     result = ExtractionResult()
 
     try:
@@ -68,9 +76,8 @@ def extract(
         result.add_skip(prefix or "<archive>", "not a readable ZIP archive")
         return result
 
-    total_bytes = 0
     for info in archive.infolist():
-        if len(result.members) >= config.max_archive_members:
+        if budget.members >= config.max_archive_members:
             result.truncated = True
             break
         if info.is_dir():
@@ -83,14 +90,23 @@ def extract(
             result.add_skip(info.filename, "password protected")
             continue
 
-        total_bytes += info.file_size
-        if total_bytes > config.max_archive_bytes:
-            result.truncated = True
-            result.add_skip(info.filename, "archive exceeds the configured size limit")
-            break
-
         try:
-            payload = archive.read(info)
+            if is_archive(info.filename):
+                # Nested ZIP bytes are intermediate input, not extracted output,
+                # but still must not be allowed to occupy unbounded memory.
+                limit = config.max_upload_bytes
+            else:
+                limit = config.max_archive_bytes - budget.bytes
+            if info.file_size > limit:
+                result.truncated = True
+                result.add_skip(info.filename, "archive exceeds the configured size limit")
+                break
+            with archive.open(info) as member_file:
+                payload = member_file.read(limit + 1)
+            if len(payload) > limit:
+                result.truncated = True
+                result.add_skip(info.filename, "archive exceeds the configured size limit")
+                break
         except (RuntimeError, zipfile.BadZipFile) as error:
             # RuntimeError is what zipfile raises for an encrypted member.
             if "password" in str(error).lower():
@@ -106,13 +122,21 @@ def extract(
             if _depth >= MAX_NESTING:
                 result.add_skip(archive_path, "nested archives too deep")
                 continue
-            nested = extract(payload, prefix=archive_path, config=config, _depth=_depth + 1)
+            nested = extract(
+                payload,
+                prefix=archive_path,
+                config=config,
+                _depth=_depth + 1,
+                _budget=budget,
+            )
             result.members.extend(nested.members)
             result.skipped.extend(nested.skipped)
             result.password_protected |= nested.password_protected
             result.truncated |= nested.truncated
             continue
 
+        budget.bytes += len(payload)
+        budget.members += 1
         result.members.append(
             ExtractedMember(
                 name=PurePosixPath(info.filename).name,
@@ -121,4 +145,5 @@ def extract(
             )
         )
 
+    archive.close()
     return result

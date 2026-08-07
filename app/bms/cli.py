@@ -33,6 +33,8 @@ from .web.security import hash_password
 def _prompt_password(supplied: str | None) -> tuple[str, bool]:
     """Return (password, generated). Never echoes a typed password."""
     if supplied:
+        if len(supplied) < 10:
+            raise SystemExit("choose a password of at least 10 characters")
         return supplied, False
     if sys.stdin.isatty():
         first = getpass.getpass("Password: ")

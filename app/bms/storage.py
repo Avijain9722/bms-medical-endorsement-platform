@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import uuid
 from pathlib import Path
 
 from .config import Settings, settings
@@ -33,9 +34,12 @@ class Storage:
         if path.exists():
             return digest, False
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_bytes(data)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
         return digest, True
 
     def get_bytes(self, digest: str) -> bytes:
@@ -68,12 +72,26 @@ class ExportStorage:
         self.config = config or settings
         self.root = self.config.export_root
 
-    def write(self, case_reference: str, filename: str, data: bytes) -> tuple[str, str]:
+    def write(
+        self,
+        case_reference: str,
+        filename: str,
+        data: bytes,
+        *,
+        version: str | None = None,
+    ) -> tuple[str, str]:
         """Write an export. Returns (relative path, sha256)."""
         directory = self.root / case_reference
+        if version:
+            directory /= version
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / filename
-        path.write_bytes(data)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_bytes(data)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
         relative = str(path.relative_to(self.root))
         return relative, hashlib.sha256(data).hexdigest()
 
@@ -85,5 +103,14 @@ class ExportStorage:
         if not directory.exists():
             return 0
         count = sum(1 for _ in directory.rglob("*") if _.is_file())
+        shutil.rmtree(directory)
+        return count
+
+    def delete_version(self, case_reference: str, version: str) -> int:
+        """Remove one failed export batch without touching prior evidence."""
+        directory = self.root / case_reference / version
+        if not directory.exists():
+            return 0
+        count = sum(1 for path in directory.rglob("*") if path.is_file())
         shutil.rmtree(directory)
         return count

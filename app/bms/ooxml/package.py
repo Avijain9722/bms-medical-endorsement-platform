@@ -55,24 +55,59 @@ class OoxmlPackage:
     # ---------------------------------------------------------------- loading
 
     @classmethod
-    def open_bytes(cls, data: bytes) -> "OoxmlPackage":
+    def open_bytes(
+        cls,
+        data: bytes,
+        *,
+        max_parts: int | None = None,
+        max_uncompressed_bytes: int | None = None,
+    ) -> "OoxmlPackage":
         """Open a package already held in memory, such as an upload."""
         import io
 
-        return cls._read(io.BytesIO(data))
+        return cls._read(
+            io.BytesIO(data),
+            max_parts=max_parts,
+            max_uncompressed_bytes=max_uncompressed_bytes,
+        )
 
     @classmethod
     def open(cls, path: str | Path) -> "OoxmlPackage":
         return cls._read(path)
 
     @classmethod
-    def _read(cls, source) -> "OoxmlPackage":
+    def _read(
+        cls,
+        source,
+        *,
+        max_parts: int | None = None,
+        max_uncompressed_bytes: int | None = None,
+    ) -> "OoxmlPackage":
         parts: dict[str, bytes] = {}
         order: list[str] = []
         infos: dict[str, PartInfo] = {}
         with zipfile.ZipFile(source) as zf:
-            for info in zf.infolist():
-                parts[info.filename] = zf.read(info.filename)
+            archive_infos = zf.infolist()
+            if max_parts is not None and len(archive_infos) > max_parts:
+                raise ValueError(f"workbook contains more than {max_parts} package parts")
+            expanded_size = sum(info.file_size for info in archive_infos)
+            if max_uncompressed_bytes is not None and expanded_size > max_uncompressed_bytes:
+                raise ValueError("workbook expands beyond the configured import limit")
+
+            actual_size = 0
+            for info in archive_infos:
+                if info.filename in parts:
+                    raise ValueError(f"workbook contains a duplicate package part: {info.filename}")
+                if max_uncompressed_bytes is None:
+                    payload = zf.read(info)
+                else:
+                    remaining = max_uncompressed_bytes - actual_size
+                    with zf.open(info) as part:
+                        payload = part.read(remaining + 1)
+                    if len(payload) > remaining:
+                        raise ValueError("workbook expands beyond the configured import limit")
+                    actual_size += len(payload)
+                parts[info.filename] = payload
                 order.append(info.filename)
                 infos[info.filename] = PartInfo(
                     name=info.filename,

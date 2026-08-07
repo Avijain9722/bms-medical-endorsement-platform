@@ -10,13 +10,24 @@ processing privilege, and no role can override a critical error.</p>
 <div class="card">
   <h2>Users</h2>
   <table>
-    <tr><th>Username</th><th>Display name</th><th>Log associate</th><th>Admin</th><th>Reset password</th></tr>
+    <tr><th>Username</th><th>Display name</th><th>Log associate</th><th>Admin</th><th>Status</th><th>Reset password</th></tr>
     {% for u in users %}
     <tr>
       <td>{{ u.username }}</td>
       <td>{{ u.display_name }}</td>
       <td>{{ u.log_associate or '—' }}</td>
       <td>{% if u.is_admin %}yes{% else %}<span class="muted">no</span>{% endif %}</td>
+      <td>
+        {% if u.id == user.id %}
+          active <span class="muted">(current account)</span>
+        {% else %}
+          <form method="post" action="/admin/users/{{ u.id }}/active" class="inline">
+            <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+            <input type="hidden" name="active" value="{% if u.active %}0{% else %}1{% endif %}">
+            <button class="secondary">{% if u.active %}Disable{% else %}Enable{% endif %}</button>
+          </form>
+        {% endif %}
+      </td>
       <td>
         <form method="post" action="/admin/users/{{ u.id }}/password" class="inline">
           <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">

@@ -32,17 +32,18 @@ from .models import (
     ReviewFlag,
     Severity,
     TransactionType,
+    User,
     new_id,
 )
 from .ocr.classify import classify
 from .ocr.fields import extract_fields
 from .ocr.text import TextPipeline
+from .ooxml.package import file_sha256
 from .outputs import log as log_output
 from .outputs import nas as nas_output
 from .outputs import package as package_output
 from .outputs import recalc as recalc_output
 from .storage import ExportStorage, Storage
-from .templates.specs import SPECS_BY_KEY
 from .validation.rules import (
     NO_SURNAME_MARKER,
     check_duplicates,
@@ -411,6 +412,10 @@ def _identities(
     return identities
 
 
+class ProcessingBlocked(Exception):
+    pass
+
+
 def build_members(
     session: Session,
     case: Case,
@@ -425,6 +430,12 @@ def build_members(
     corrections are lost by design -- the UI warns before reprocessing.
     """
     processing_date = processing_date or date.today()
+
+    if session.scalar(select(LogEntry.id).where(LogEntry.case_id == case.id).limit(1)):
+        raise ProcessingBlocked(
+            "This case already has operational log entries. Reprocessing would delete "
+            "the member records those entries refer to, so it has been refused."
+        )
 
     for existing in session.scalars(select(Member).where(Member.case_id == case.id)):
         session.delete(existing)
@@ -705,7 +716,14 @@ def update_member_field(
         raise AttributeError(f"members have no field {field_key!r}")
     old = getattr(member, field_key)
     cleaned = (value or "").strip() or None
-    setattr(member, field_key, cleaned)
+    if (old or None) != cleaned:
+        setattr(member, field_key, cleaned)
+
+        # Approval applies to the reviewed values, not permanently to the row. A
+        # meaningful correction must be reviewed and approved again before export.
+        member.approved = False
+        member.approved_by_id = None
+        member.approved_at = None
 
     provenance = dict(member.provenance or {})
     entry = dict(provenance.get(field_key) or {})
@@ -768,7 +786,14 @@ def blocking_flags(session: Session, case: Case) -> list[ReviewFlag]:
     )
 
 
-def approve_member(session: Session, case: Case, member: Member, *, actor: str) -> None:
+def approve_member(
+    session: Session,
+    case: Case,
+    member: Member,
+    *,
+    actor: str,
+    approver_id: str | None = None,
+) -> None:
     """Approve one member. Refuses while that member has a critical flag."""
     critical = [
         flag
@@ -786,6 +811,9 @@ def approve_member(session: Session, case: Case, member: Member, *, actor: str) 
             "issue(s). Correct the underlying data first -- critical errors cannot be overridden."
         )
     member.approved = True
+    if approver_id is None:
+        approver_id = session.scalar(select(User.id).where(User.username == actor))
+    member.approved_by_id = approver_id
     member.approved_at = datetime.now(timezone.utc)
     audit.record(
         session,
@@ -813,6 +841,9 @@ def export_case(
     config = config or settings
     config.ensure_directories()
 
+    if template_key not in nas_output.SUPPORTED_KEYS:
+        raise ExportBlocked(f"{template_key!r} is not a supported export template.")
+
     blocking = blocking_flags(session, case)
     if blocking:
         raise ExportBlocked(
@@ -829,6 +860,16 @@ def export_case(
     approved = [member for member in members if member.approved]
     if not approved:
         raise ExportBlocked("No members have been approved for export.")
+
+    # Validate the transaction/template contract before packaging documents or
+    # writing any files. build_rows reports mismatches instead of guessing.
+    preview = nas_output.build_rows(template_key, approved)
+    if preview.skipped or len(preview.rows) != len(approved):
+        reasons = "; ".join(reason for _, reason in preview.skipped[:3])
+        raise ExportBlocked(
+            "The selected template does not match every approved member"
+            + (f": {reasons}" if reasons else ".")
+        )
 
     export_storage = ExportStorage(config)
     work_dir = config.data_root / "tmp"
@@ -850,7 +891,7 @@ def export_case(
         documents_by_member,
         read_bytes=storage.get_bytes,
         case_reference=case.reference,
-        first_data_row=SPECS_BY_KEY[template_key].first_data_row,
+        first_data_row=preview.spec.first_data_row,
     )
     attachments = {
         member.id: {
@@ -862,7 +903,8 @@ def export_case(
 
     # --- portal workbook -----------------------------------------------------
     suffix = ".xlsx"
-    portal_path = work_dir / f"{case.reference}-portal{suffix}"
+    batch_id = new_id()
+    portal_path = work_dir / f"{case.reference}-{batch_id}-portal{suffix}"
     try:
         built = nas_output.generate_workbook(
             template_key,
@@ -878,18 +920,62 @@ def export_case(
         # a scratch copy in var/tmp for the life of the installation -- and the
         # retention purge does not look in that directory.
         portal_path.unlink(missing_ok=True)
+    # --- BMS log -------------------------------------------------------------
+    shared_by = _shared_by(session, case)
+    entries = list(session.scalars(select(LogEntry).where(LogEntry.case_id == case.id)))
+    recorded_member_ids = {entry.member_id for entry in entries}
+    for member in approved:
+        if member.id not in recorded_member_ids:
+            entry = log_output.build_entry(case, member, shared_by=shared_by)
+            session.add(entry)
+            entries.append(entry)
+    session.flush()
+
+    log_path = work_dir / f"{case.reference}-{batch_id}-log.xlsx"
+    try:
+        log_result = log_output.export(entries, repo_root=config.template_root, output=log_path)
+        log_bytes = log_path.read_bytes()
+    finally:
+        log_path.unlink(missing_ok=True)
+    # Nothing is persisted until both workbooks have generated successfully.
+    # A batch directory makes every export immutable and lets a failed write be
+    # removed without touching an earlier successful export.
     portal_name = f"{case.reference}-{template_key}{suffix}"
-    relative, digest = export_storage.write(case.reference, portal_name, portal_bytes)
-    portal_recalc = recalc_output.recalculate(
-        export_storage.absolute(relative), template_key=template_key
-    )
+    package_name = f"{case.reference}-supporting-documents.zip"
+    log_name = f"{case.reference}-New-Log-Format-2026.xlsx"
+    try:
+        relative, _ = export_storage.write(
+            case.reference, portal_name, portal_bytes, version=batch_id
+        )
+        portal_recalc = recalc_output.recalculate(
+            export_storage.absolute(relative), template_key=template_key
+        )
+        portal_digest = file_sha256(export_storage.absolute(relative))
+
+        package_relative = package_digest = None
+        if package.file_count:
+            package_relative, package_digest = export_storage.write(
+                case.reference, package_name, package.data, version=batch_id
+            )
+
+        log_relative, _ = export_storage.write(
+            case.reference, log_name, log_bytes, version=batch_id
+        )
+        log_recalc = recalc_output.recalculate(
+            export_storage.absolute(log_relative), template_key="bms.log.2026"
+        )
+        log_digest = file_sha256(export_storage.absolute(log_relative))
+    except Exception:
+        export_storage.delete_version(case.reference, batch_id)
+        raise
+
     portal_export = Export(
         case_id=case.id,
         kind="portal",
         template_key=template_key,
         filename=portal_name,
         relative_path=relative,
-        sha256=digest,
+        sha256=portal_digest,
         fingerprint_ok=True,
         row_count=len(built.rows),
         recalculated=portal_recalc.performed,
@@ -897,46 +983,20 @@ def export_case(
     )
     session.add(portal_export)
 
-    # --- supporting-document ZIP --------------------------------------------
-    package_export = None
-    if package.file_count:
-        package_name = f"{case.reference}-supporting-documents.zip"
-        package_relative, package_digest = export_storage.write(
-            case.reference, package_name, package.data
+    if package_relative and package_digest:
+        session.add(
+            Export(
+                case_id=case.id,
+                kind="zip",
+                template_key=None,
+                filename=package_name,
+                relative_path=package_relative,
+                sha256=package_digest,
+                fingerprint_ok=True,
+                row_count=package.file_count,
+            )
         )
-        package_export = Export(
-            case_id=case.id,
-            kind="zip",
-            template_key=None,
-            filename=package_name,
-            relative_path=package_relative,
-            sha256=package_digest,
-            fingerprint_ok=True,
-            row_count=package.file_count,
-        )
-        session.add(package_export)
 
-    # --- BMS log -------------------------------------------------------------
-    shared_by = _shared_by(session, case)
-    entries = list(session.scalars(select(LogEntry).where(LogEntry.case_id == case.id)))
-    if not entries:
-        for member in approved:
-            entry = log_output.build_entry(case, member, shared_by=shared_by)
-            session.add(entry)
-            entries.append(entry)
-        session.flush()
-
-    log_path = work_dir / f"{case.reference}-log.xlsx"
-    try:
-        log_result = log_output.export(entries, repo_root=config.template_root, output=log_path)
-        log_bytes = log_path.read_bytes()
-    finally:
-        log_path.unlink(missing_ok=True)
-    log_name = f"{case.reference}-New-Log-Format-2026.xlsx"
-    log_relative, log_digest = export_storage.write(case.reference, log_name, log_bytes)
-    log_recalc = recalc_output.recalculate(
-        export_storage.absolute(log_relative), template_key="bms.log.2026"
-    )
     log_export = Export(
         case_id=case.id,
         kind="log",
@@ -952,7 +1012,11 @@ def export_case(
     session.add(log_export)
 
     case.status = CaseStatus.EXPORTED.value
-    session.flush()
+    try:
+        session.flush()
+    except Exception:
+        export_storage.delete_version(case.reference, batch_id)
+        raise
 
     audit.record(
         session,
@@ -965,7 +1029,7 @@ def export_case(
             "template_key": template_key,
             "portal_rows": len(built.rows),
             "log_rows": log_result.row_count,
-            "portal_sha256": digest,
+            "portal_sha256": portal_digest,
             "log_sha256": log_digest,
             "package_files": package.file_count,
             "package_skipped": len(package.skipped),
@@ -975,8 +1039,6 @@ def export_case(
 
 
 def _shared_by(session: Session, case: Case) -> str | None:
-    from .models import User
-
     if not case.owner_id:
         return None
     user = session.get(User, case.owner_id)

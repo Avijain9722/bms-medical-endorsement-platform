@@ -69,11 +69,11 @@ By instruction and by design:
 
 app/                       the application
   bms/                     pipeline, ocr, matching, validation, outputs, ooxml, web
-  tests/                   300 automated tests
+  tests/                   314 automated tests
   migrations/              Alembic
+  tools/                   source verification and reporting helpers
 deploy/                    install scripts and service units
 docs/                      the documentation set
-  tools/                   verify_sources.py and reporting helpers
 ```
 
 Everything numbered `00_`–`05_` is supplied material. The platform reads it and
@@ -82,7 +82,9 @@ never writes to it.
 ## Verify
 
 ```bash
-cd app && python3 -m pytest tests -q     # 300 tests
+cd app && python3 -m pytest tests -q     # 314 tests
+cd app && python3 -m ruff check .        # reliability lint
+cd app && python3 -m compileall -q bms   # production-module compile check
 cd app && python3 tools/verify_sources.py   # supplied workbooks unaltered
 curl -s http://127.0.0.1:8000/health     # what this host can and cannot do
 ```
