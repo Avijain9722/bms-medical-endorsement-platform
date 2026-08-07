@@ -465,10 +465,11 @@ def build_members(
     file_by_id, field_by_file = _document_evidence(session, case)
     groups, unassigned = group_documents(groups, _identities(file_by_id, field_by_file))
 
+    case_emirate = _case_emirate(case, session)
     effective_date, effective_reason = resolve_effective_date(
         case.transaction_type,
         processing_date=processing_date,
-        emirate=_case_emirate(case, session),
+        emirate=case_emirate,
     )
 
     members: list[Member] = []
@@ -487,7 +488,7 @@ def build_members(
             contract_name=case.contract_name,
             staff_id=group.staff_id,
             member_card_no=group.member_card_no,
-            effective_date=effective_date.isoformat(),
+            effective_date=effective_date.isoformat() if effective_date else None,
             provenance={},
         )
 
@@ -551,7 +552,7 @@ def build_members(
         unassigned=unassigned,
         file_by_id=file_by_id,
         processing_date=processing_date,
-        effective_reason=effective_reason,
+        emirate=case_emirate,
     )
 
     case.status = CaseStatus.REVIEW.value
@@ -567,7 +568,7 @@ def build_members(
         detail={
             "members": len(members),
             "unassigned_documents": len(unassigned),
-            "effective_date": effective_date.isoformat(),
+            "effective_date": effective_date.isoformat() if effective_date else None,
             "effective_date_reason": effective_reason,
         },
     )
@@ -632,7 +633,7 @@ def _raise_flags(
     unassigned,
     file_by_id,
     processing_date: date,
-    effective_reason: str,
+    emirate: str | None,
 ) -> None:
     def add(code: str, severity: Severity, message: str, member: Member | None = None, field_key=None):
         session.add(
@@ -692,6 +693,7 @@ def _raise_flags(
             processing_date=processing_date,
             documents=documents,
             is_newborn=parsed.is_newborn,
+            emirate=emirate,
         ):
             add(finding.code, finding.severity, finding.message, member, finding.field_key)
 
@@ -710,6 +712,7 @@ def update_member_field(
     *,
     actor: str,
     reason: str | None = None,
+    source_name: str | None = None,
 ) -> None:
     """Apply a reviewer correction, with an audit entry and provenance update."""
     if not hasattr(member, field_key):
@@ -727,7 +730,13 @@ def update_member_field(
 
     provenance = dict(member.provenance or {})
     entry = dict(provenance.get(field_key) or {})
-    entry.update({"confidence": 1.0, "reviewed": True, "source_name": f"{actor} (manual)"})
+    entry.update(
+        {
+            "confidence": 1.0,
+            "reviewed": True,
+            "source_name": source_name or f"{actor} (manual)",
+        }
+    )
     provenance[field_key] = entry
     member.provenance = provenance
 
@@ -741,6 +750,41 @@ def update_member_field(
         new_value=cleaned,
         actor=actor,
         reason=reason,
+    )
+
+
+def apply_dubai_deletion_date_rule(
+    session: Session,
+    case: Case,
+    member: Member,
+    *,
+    actor: str,
+) -> None:
+    """Derive, rather than ask staff to calculate, a Dubai deletion date."""
+    if member.transaction_type != TransactionType.DELETION.value:
+        return
+    emirate = _case_emirate(case, session)
+    if (emirate or "").strip().lower() not in {"dubai", "dxb"}:
+        return
+
+    try:
+        cancellation = date.fromisoformat(member.cancellation_date or "")
+    except ValueError:
+        cancellation = None
+    effective, reason = resolve_effective_date(
+        member.transaction_type,
+        processing_date=date.today(),
+        emirate=emirate,
+        cancellation_date=cancellation,
+    )
+    update_member_field(
+        session,
+        member,
+        "effective_date",
+        effective.isoformat() if effective else None,
+        actor=actor,
+        reason=reason,
+        source_name="BMS rule (Dubai cancellation + 30 days)",
     )
 
 
@@ -759,6 +803,7 @@ def revalidate_member(session: Session, case: Case, member: Member, *, processin
         processing_date=processing_date or date.today(),
         documents=documents,
         is_newborn=is_newborn,
+        emirate=_case_emirate(case, session),
     ):
         session.add(
             ReviewFlag(

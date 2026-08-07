@@ -82,7 +82,7 @@ never writes to it.
 ## Verify
 
 ```bash
-cd app && python3 -m pytest tests -q     # 314 tests
+cd app && python3 -m pytest tests -q     # 324 tests
 cd app && python3 -m ruff check .        # reliability lint
 cd app && python3 -m compileall -q bms   # production-module compile check
 cd app && python3 tools/verify_sources.py   # supplied workbooks unaltered

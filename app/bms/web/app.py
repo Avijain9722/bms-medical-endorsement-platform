@@ -813,7 +813,8 @@ EDITABLE_FIELDS = (
     "marital_status", "nationality", "passport_no", "passport_expiry",
     "emirates_id", "unified_no", "visa_file_number", "birth_certificate_number",
     "staff_id", "relation", "category", "contract_name", "effective_date",
-    "member_card_no", "deletion_reason", "principal_card_no", "email", "mobile_no",
+    "member_card_no", "deletion_reason", "cancellation_date", "principal_card_no",
+    "email", "mobile_no",
 )
 
 
@@ -834,6 +835,9 @@ async def update_member(
             pipeline.update_member_field(
                 session, member, field_key, str(form[field_key]), actor=user.username
             )
+    pipeline.apply_dubai_deletion_date_rule(
+        session, case, member, actor=user.username
+    )
     pipeline.revalidate_member(session, case, member)
     return RedirectResponse(f"/cases/{case_id}/members/{member_id}", status_code=303)
 

@@ -31,7 +31,7 @@ been given, and does not let anyone override a critical error.
 - Nine registered templates: NAS addition (ALDAR, IFFCO, HR), NAS deletion,
   ADNIC enrolment and termination, Sukoon addition, Daman addition, and the
   approved `New Log Format -2026`.
-- **297 automated tests, 0 failures, 0 skipped** — see
+- **324 automated tests, 0 failures, 0 skipped** — see
   [TEST_RESULTS.md](TEST_RESULTS.md) for what that does and does not cover.
 - Two business rules still open with BMS: the Emirates ID check-digit algorithm,
   and the mapping from a client's deletion wording to the insurers' fixed lists.

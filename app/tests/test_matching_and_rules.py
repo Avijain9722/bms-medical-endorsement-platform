@@ -171,8 +171,40 @@ def test_dubai_deletion_without_a_cancellation_date_says_so():
     value, reason = resolve_effective_date(
         "deletion", processing_date=date(2026, 8, 5), emirate="Dubai"
     )
-    assert value == date(2026, 8, 5)
+    assert value is None
     assert "cancellation date" in reason
+
+
+def test_dubai_deletion_without_a_cancellation_date_is_critical():
+    findings = check_member(
+        member(
+            transaction_type=TransactionType.DELETION.value,
+            member_card_no="EH2F-6FJF-LFL2-FLED",
+            effective_date=None,
+        ),
+        emirate="Dubai",
+    )
+    assert any(
+        finding.code == "cancellation_date_missing" and finding.blocks_export
+        for finding in findings
+    )
+
+
+def test_dubai_deletion_effective_date_must_match_cancellation_plus_thirty_days():
+    findings = check_member(
+        member(
+            transaction_type=TransactionType.DELETION.value,
+            member_card_no="EH2F-6FJF-LFL2-FLED",
+            cancellation_date="2026-08-01",
+            effective_date="2026-08-30",
+        ),
+        processing_date=date(2026, 8, 5),
+        emirate="Dubai",
+    )
+    assert any(
+        finding.code == "deletion_effective_date_incorrect" and finding.blocks_export
+        for finding in findings
+    )
 
 
 # ------------------------------------------------------------- member rules
