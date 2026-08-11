@@ -1,0 +1,257 @@
+BMS MEDICAL ENDORSEMENT PLATFORM
+================================
+
+Everything is in this one folder. It installs and runs with NO
+internet connection.
+
+This file is the starting point for the delivered package. It lives in
+the repository so it is versioned with the code it describes, rather
+than being written by hand at packaging time.
+
+
+=====================================================================
+  TO RUN IT  --  two steps
+=====================================================================
+
+STEP 1.  Install Python 3.14
+
+         https://www.python.org/downloads/windows/
+         Choose the latest 3.14 "Windows installer (64-bit)".
+
+         *** During setup, tick "Add Python to PATH" ***
+         It is easy to miss, and nothing works without it.
+
+         It must be 3.14. This package contains the software
+         libraries already built for that version, which is what lets
+         it install with no internet. If you install a different
+         version the installer will stop and tell you so, rather than
+         failing in a confusing way -- and I can rebuild it for
+         whatever version you have.
+
+
+STEP 2.  Double-click:   deploy\START-WINDOWS.bat
+
+         The first run sets everything up. A few minutes, no internet.
+         Later runs start in seconds.
+
+         Your browser opens at  http://127.0.0.1:8000
+
+
+=====================================================================
+  SIGNING IN THE FIRST TIME
+=====================================================================
+
+On the very first start the platform creates one administrator
+account and prints its password in the black window:
+
+    [bms] created initial administrator 'bms' with password: 8Kd2wQ...
+
+WRITE THAT PASSWORD DOWN. It is shown once and cannot be recovered.
+It is randomly generated, so it differs on every installation.
+
+Sign in as 'bms', create accounts for your team under Admin, then
+change or disable that first one.
+
+If you miss it, you are not locked out:
+
+    cd app
+    .venv\Scripts\python -m bms.cli reset-password --username bms
+
+Keep the black window open while you work. Closing it stops the
+platform. Nothing is lost -- everything is saved to disk as you go.
+
+SIGN-IN SECURITY: five wrong passwords for the same user, or from the
+same machine, locks that name out for fifteen minutes. An
+administrator can reset the password immediately instead of waiting.
+
+
+=====================================================================
+  CHECK IT INSTALLED PROPERLY  --  do this first
+=====================================================================
+
+    powershell -ExecutionPolicy Bypass -File deploy\verify.ps1
+
+Checks your insurer templates are unaltered and runs the whole test
+suite, offline. It should report 300 passed.
+
+This is the most useful thing you can run on the BMS machine: it
+proves the installation is complete THERE, not just where it was
+built. Worth repeating after any upgrade or restore.
+
+EXPECTED, NOT A PROBLEM: the template check lists seven files under
+04_DEVELOPMENT_EXAMPLES as "missing". Those are the sample client
+emails, deliberately left out of this package -- the platform never
+reads them and they were never anonymised. They are listed as
+advisory, and the check still ends with PASSED. Your insurer
+templates and the log template are the twelve "immutable" entries,
+and those must all verify.
+
+
+=====================================================================
+  WHAT IS IN HERE
+=====================================================================
+
+  START_HERE.txt    this file
+  app/              the platform, and its 300 automated tests
+  deploy/           installer, launcher, verify script
+  deploy/wheelhouse the software libraries, so it installs offline
+  docs/             eleven manuals -- start with docs/README.md
+  CLAUDE.md         working notes: the rules that must not be undone
+  00_ .. 05_        your original supplied files: the insurer
+                    templates, the BMS log template, the brand assets
+                    and the field guide. Read-only; never written to.
+
+  Excel automation (pywin32) is INCLUDED. Nothing else to download.
+
+  NOT included: 04_DEVELOPMENT_EXAMPLES (the sample client emails).
+  The platform never reads them and they were never anonymised.
+
+
+=====================================================================
+  TWO OPTIONAL EXTRAS
+=====================================================================
+
+Neither is required. The platform works without both, and tells you
+at http://127.0.0.1:8000/health which are present.
+
+  TESSERACT   Reads scanned documents automatically. Without it,
+              scans are flagged for someone to type in by hand --
+              nothing is ever guessed. It can be placed INSIDE this
+              folder with no administrator rights:
+              see docs/BUNDLING_TESSERACT.md
+
+  CLAMAV      Virus scanning for uploads. Without it, uploads are
+              recorded as UNSCANNED -- never as clean -- and raise a
+              warning flag.
+
+Microsoft Excel itself must be installed for the log and Daman
+formulas to be calculated before hand-off. Without Excel both
+workbooks are still produced correctly; Excel works the formulas out
+when you open the file.
+
+
+=====================================================================
+  BEFORE REAL USE
+=====================================================================
+
+  1. Run verify (above) on the BMS machine.
+  2. Enter your client master under Admin -> Clients, or import it
+     from a spreadsheet. Set each sub-group's EMIRATE: it decides the
+     deletion date rule (Abu Dhabi = processing date, Dubai =
+     cancellation + 30 days).
+  3. Create an account per team member. The log's "SHARED BY" column
+     is filled from whoever is signed in, so shared accounts make the
+     log and the audit trail wrong.
+  4. If you put the platform behind HTTPS, set BMS_COOKIE_SECURE=true
+     in app\.env. Leave it false until TLS is actually in place.
+  5. Read docs/BACKUP_AND_RECOVERY.md and decide your backup schedule
+     before you have anything to lose.
+
+
+=====================================================================
+  ADDING ANOTHER INSURER LATER
+=====================================================================
+
+A new insurer is three data edits, not new processing code:
+
+  1. app/bms/templates/specs.py    where the workbook is, and which
+                                   column letter each field writes to
+  2. app/bms/outputs/mapping.py    how that insurer spells Male,
+                                   Spouse, Married -- and what its
+                                   dropdowns genuinely cannot express
+  3. app/bms/outputs/bindings.py   which member field feeds which
+                                   column
+
+Put the master workbook in 02_PORTAL_TEMPLATES/ and add its SHA-256
+to 00_START_HERE/SHA256SUMS.txt, then point the client's policy at
+the new template under Admin -> Clients.
+
+To read the column letters out of the workbook rather than counting
+them by eye:
+
+    cd app
+    .venv\Scripts\python tools\headers.py "..\02_PORTAL_TEMPLATES\New.xlsx" Members 1
+
+Then run deploy\verify.ps1. The tests pick the new template up
+automatically and will fail if a column does not exist, if a value is
+not one the insurer's own dropdown accepts, or if the generated file
+no longer matches the master's structure.
+
+
+=====================================================================
+  WHICH MANUAL TO READ
+=====================================================================
+
+  Processing endorsements ......... docs/USER_MANUAL.md
+  Running the server .............. docs/ADMIN_MANUAL.md
+  Adding OCR to this folder ....... docs/BUNDLING_TESSERACT.md
+  Installing with no internet ..... docs/OFFLINE_INSTALL.md
+  Backups and recovery ............ docs/BACKUP_AND_RECOVERY.md
+  Something on screen to look up .. docs/ERROR_REFERENCE.md
+  What was tested, what was not ... docs/TEST_RESULTS.md
+  How it is built ................. docs/ARCHITECTURE.md
+
+
+=====================================================================
+  WHAT THIS WILL NOT DO
+=====================================================================
+
+  - It does not read mailboxes. You paste the client's email body.
+  - It sends nothing to any external service. Once installed, it
+    works with the network cable out.
+  - It never changes the structure of an insurer workbook. Every
+    generated file is re-checked against the master and blocked if
+    anything moved.
+  - It never invents a value. Missing information is flagged.
+  - It has no override for a critical error. The data must be fixed.
+  - Post-submission columns stay genuinely blank until you record the
+    matching action.
+
+
+=====================================================================
+  KNOWN LIMITS  --  please read
+=====================================================================
+
+1. WINDOWS IS TESTED AUTOMATICALLY, INCLUDING THIS PACKAGE.
+   The full suite, install.ps1, verify.ps1 and the running platform
+   are exercised on Windows on every change. The offline bundle is
+   also cross-built and then installed on Windows with the network
+   refused -- which is how a missing library reaches nobody now.
+
+   What is still not covered: YOUR machine, YOUR Excel, YOUR domain
+   account. Run deploy\verify.ps1 there before real use.
+
+2. OCR ACCURACY IS UNPROVEN ON YOUR DOCUMENTS.
+   OCR is proven to RUN. How well it reads YOUR scans needs your real
+   documents, which were never available here.
+
+3. TWO BUSINESS RULES ARE STILL WAITING ON BMS.
+   - The Emirates ID check-digit rule. The platform checks the format
+     (784-YYYY-NNNNNNN-N) but cannot confirm the final digit is
+     arithmetically correct, because that rule was never supplied.
+   - How a client's wording for a deletion reason maps to each
+     insurer's fixed list. Until supplied, "Others" is used with the
+     client's own wording in the free-text field where the template
+     allows it.
+   Neither is guessed at. Supply either and it becomes a settings
+   change, not a rebuild.
+
+4. DAMAN NEEDS WRITTEN PERMISSION.
+   Populating Daman's template programmatically needs Daman's written
+   agreement, recorded as not currently held.
+
+5. ONE SERVER ONLY.
+   Sign-in throttling is held in memory, so it is correct for a
+   single instance but would not coordinate across several.
+
+
+=====================================================================
+  A NOTE ON THE LOG TEMPLATE
+=====================================================================
+
+03_INTERNAL_LOG_TEMPLATE/ is your original workbook, which still
+holds its 1,101 example member rows. The platform strips those when
+it registers the template and never imports them -- it starts with an
+empty log and builds it from the cases it processes. The rows remain
+in the source file only because that file is yours and was left
+exactly as supplied.
